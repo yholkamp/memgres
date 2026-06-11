@@ -644,6 +644,22 @@ class ExprEvaluator {
         Object leftVal = cop.left() != null ? evalExpr(cop.left(), ctx) : null;
         Object rightVal = evalExpr(cop.right(), ctx);
 
+        // #= is hstore populate_record: record #= hstore → record
+        if ("#=".equals(cop.opSymbol()) && cop.left() != null) {
+            if (!executor.database.hasExtension("hstore"))
+                throw new MemgresException("operator does not exist: record #= hstore", "42883");
+            String typeName = executor.resolveCompositeTypeName(cop.left(), ctx);
+            HstoreValue hs = (rightVal == null)
+                    ? new HstoreValue(new java.util.LinkedHashMap<>())
+                    : (rightVal instanceof HstoreValue)
+                        ? (HstoreValue) rightVal : HstoreValue.parse(rightVal.toString());
+            java.util.List<CreateTypeStmt.CompositeField> fields =
+                    executor.compositeTypeHandler.resolveFieldsForType(typeName);
+            if (fields == null)
+                throw new MemgresException("operator does not exist: record #= hstore", "42883");
+            return executor.compositeTypeHandler.populateFromHstore(leftVal, hs, fields);
+        }
+
         // Built-in text operators that aren't registered as user PgOperator.
         // ^@ is PG 11+ starts-with on text (treated as STRICT).
         if ("^@".equals(cop.opSymbol()) && cop.left() != null) {
@@ -886,6 +902,28 @@ class ExprEvaluator {
                     return GeometricOperations.isVertical((GeometricOperations.PgLseg) geom);
                 }
                 throw new MemgresException("operator ?| not supported for type " + val.getClass().getSimpleName(), "42883");
+            }
+            case HSTORE_TO_ARRAY: {
+                if (val == null) return null;
+                HstoreValue h = (val instanceof HstoreValue) ? (HstoreValue) val : HstoreValue.parse(val.toString());
+                java.util.List<Object> result = new java.util.ArrayList<>();
+                for (java.util.Map.Entry<String, String> e : h.getData().entrySet()) {
+                    result.add(e.getKey());
+                    result.add(e.getValue());
+                }
+                return result;
+            }
+            case HSTORE_TO_MATRIX: {
+                if (val == null) return null;
+                HstoreValue h = (val instanceof HstoreValue) ? (HstoreValue) val : HstoreValue.parse(val.toString());
+                java.util.List<Object> result = new java.util.ArrayList<>();
+                for (java.util.Map.Entry<String, String> e : h.getData().entrySet()) {
+                    java.util.List<Object> pair = new java.util.ArrayList<>();
+                    pair.add(e.getKey());
+                    pair.add(e.getValue());
+                    result.add(pair);
+                }
+                return result;
             }
             default:
                 throw new IllegalStateException("Unknown unary op: " + op);

@@ -40,15 +40,16 @@ public final class HstoreValue {
             // expect =>
             if (i < len && s.charAt(i) == '=' && i + 1 < len && s.charAt(i + 1) == '>') {
                 i += 2;
+            } else {
+                throw new MemgresException("syntax error in hstore: unexpected end of string", "42601");
             }
 
             // skip whitespace
             while (i < len && s.charAt(i) == ' ') i++;
 
-            // parse value
+            // parse value — PG requires a value after =>
             if (i >= len) {
-                map.put(key, null);
-                break;
+                throw new MemgresException("syntax error in hstore: unexpected end of string", "42601");
             }
             String val;
             // check for NULL (unquoted)
@@ -60,7 +61,7 @@ public final class HstoreValue {
                 val = parseToken(s, i);
                 i += rawTokenLength(s, i);
             }
-            map.put(key, val);
+            map.putIfAbsent(key, val);
         }
         return new HstoreValue(map);
     }
@@ -151,6 +152,72 @@ public final class HstoreValue {
 
     public Map<String, String> getData() {
         return Collections.unmodifiableMap(data);
+    }
+
+    /** Merge two hstores — right side wins on key conflicts. */
+    public HstoreValue merge(HstoreValue other) {
+        Map<String, String> merged = new LinkedHashMap<>(data);
+        merged.putAll(other.data);
+        return new HstoreValue(merged);
+    }
+
+    /** Delete a single key. */
+    public HstoreValue deleteKey(String key) {
+        Map<String, String> copy = new LinkedHashMap<>(data);
+        copy.remove(key);
+        return new HstoreValue(copy);
+    }
+
+    /** Delete multiple keys. */
+    public HstoreValue deleteKeys(java.util.Collection<String> keys) {
+        Map<String, String> copy = new LinkedHashMap<>(data);
+        for (String k : keys) copy.remove(k);
+        return new HstoreValue(copy);
+    }
+
+    /** Return a new hstore containing only the given keys. */
+    public HstoreValue slice(java.util.Collection<String> keys) {
+        Map<String, String> result = new LinkedHashMap<>();
+        for (String k : keys) {
+            if (data.containsKey(k)) result.put(k, data.get(k));
+        }
+        return new HstoreValue(result);
+    }
+
+    /** Return keys as a list. */
+    public java.util.List<String> keys() {
+        return new java.util.ArrayList<>(data.keySet());
+    }
+
+    /** Return values as a list. */
+    public java.util.List<String> values() {
+        return new java.util.ArrayList<>(data.values());
+    }
+
+    /** Check if the key has a non-NULL value. */
+    public boolean defined(String key) {
+        return data.containsKey(key) && data.get(key) != null;
+    }
+
+    /** Check if this hstore is contained by another (i.e., other contains all of this). */
+    public boolean containedBy(HstoreValue other) {
+        return other.containsAll(this);
+    }
+
+    public int size() {
+        return data.size();
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (!(o instanceof HstoreValue)) return false;
+        return data.equals(((HstoreValue) o).data);
+    }
+
+    @Override
+    public int hashCode() {
+        return data.hashCode();
     }
 
     @Override

@@ -82,6 +82,52 @@ class FunctionEvaluator {
         }
     }
 
+    private static HstoreValue toHstore(Object val) {
+        if (val instanceof HstoreValue) return (HstoreValue) val;
+        return HstoreValue.parse(val.toString());
+    }
+
+    /** Loose JSON: numeric values are unquoted, NULLs are JSON null. PG does NOT unquote booleans. */
+    private static String hstoreToJsonLooseString(HstoreValue h) {
+        StringBuilder sb = new StringBuilder("{");
+        boolean first = true;
+        for (java.util.Map.Entry<String, String> e : h.getData().entrySet()) {
+            if (!first) sb.append(", ");
+            first = false;
+            sb.append("\"").append(e.getKey().replace("\\", "\\\\").replace("\"", "\\\"")).append("\": ");
+            String v = e.getValue();
+            if (v == null) {
+                sb.append("null");
+            } else {
+                try {
+                    new java.math.BigDecimal(v);
+                    sb.append(v); // valid number — unquoted
+                } catch (NumberFormatException ex) {
+                    sb.append("\"").append(v.replace("\\", "\\\\").replace("\"", "\\\"")).append("\"");
+                }
+            }
+        }
+        sb.append("}");
+        return sb.toString();
+    }
+
+    private static String hstoreToJsonString(HstoreValue h) {
+        StringBuilder sb = new StringBuilder("{");
+        boolean first = true;
+        for (java.util.Map.Entry<String, String> e : h.getData().entrySet()) {
+            if (!first) sb.append(", ");
+            first = false;
+            sb.append("\"").append(e.getKey().replace("\\", "\\\\").replace("\"", "\\\"")).append("\": ");
+            if (e.getValue() == null) {
+                sb.append("null");
+            } else {
+                sb.append("\"").append(e.getValue().replace("\\", "\\\\").replace("\"", "\\\"")).append("\"");
+            }
+        }
+        sb.append("}");
+        return sb.toString();
+    }
+
     private void requireArgs(FunctionCallExpr fn, int min) {
         if (fn.args().size() < min) {
             throw new MemgresException(
@@ -1808,6 +1854,243 @@ class FunctionEvaluator {
             case "icu_unicode_version": {
                 // Returns the ICU unicode version string — stub
                 return "15.1";
+            }
+
+            // =================================================================
+            // hstore extension functions
+            // =================================================================
+            case "akeys": {
+                requireExtension("hstore", name, fn.args().size());
+                Object val = executor.evalExpr(fn.args().get(0), ctx);
+                if (val == null) return null;
+                HstoreValue h = toHstore(val);
+                return h.keys();
+            }
+            case "avals": {
+                requireExtension("hstore", name, fn.args().size());
+                Object val = executor.evalExpr(fn.args().get(0), ctx);
+                if (val == null) return null;
+                HstoreValue h = toHstore(val);
+                return h.values();
+            }
+            case "skeys":
+            case "svals":
+            case "each": {
+                // These are set-returning functions — they work in FROM clauses via FromFunctionResolver,
+                // and in SELECT target list via SRF expansion (returning a List).
+                requireExtension("hstore", name, fn.args().size());
+                Object val = executor.evalExpr(fn.args().get(0), ctx);
+                if (val == null) return null;
+                HstoreValue h = toHstore(val);
+                if (name.equals("skeys")) {
+                    return new ArrayList<>(h.keys());
+                } else if (name.equals("svals")) {
+                    return new ArrayList<>(h.values());
+                } else {
+                    // each: list of key-value pairs
+                    List<String> pairs = new ArrayList<>();
+                    for (java.util.Map.Entry<String, String> e : h.getData().entrySet()) {
+                        pairs.add("(" + e.getKey() + "," + (e.getValue() != null ? e.getValue() : "") + ")");
+                    }
+                    return pairs;
+                }
+            }
+            case "exist":
+            case "isexists": {
+                requireExtension("hstore", name, fn.args().size());
+                Object val = executor.evalExpr(fn.args().get(0), ctx);
+                Object key = executor.evalExpr(fn.args().get(1), ctx);
+                if (val == null || key == null) return null;
+                HstoreValue h = toHstore(val);
+                return h.containsKey(key.toString());
+            }
+            case "defined":
+            case "isdefined": {
+                requireExtension("hstore", name, fn.args().size());
+                Object val = executor.evalExpr(fn.args().get(0), ctx);
+                Object key = executor.evalExpr(fn.args().get(1), ctx);
+                if (val == null || key == null) return null;
+                HstoreValue h = toHstore(val);
+                return h.defined(key.toString());
+            }
+            case "delete": {
+                requireExtension("hstore", name, fn.args().size());
+                Object val = executor.evalExpr(fn.args().get(0), ctx);
+                Object key = executor.evalExpr(fn.args().get(1), ctx);
+                if (val == null) return null;
+                HstoreValue h = toHstore(val);
+                if (key == null) return h;
+                if (key instanceof java.util.List) {
+                    java.util.List<String> keys = new java.util.ArrayList<>();
+                    for (Object k : (java.util.List<?>) key) keys.add(k != null ? k.toString() : null);
+                    return h.deleteKeys(keys);
+                }
+                if (key instanceof HstoreValue) {
+                    // delete(hstore, hstore) — remove matching key/value pairs
+                    HstoreValue rh = (HstoreValue) key;
+                    java.util.Map<String, String> result = new java.util.LinkedHashMap<>(h.getData());
+                    for (java.util.Map.Entry<String, String> e : rh.getData().entrySet()) {
+                        String v = result.get(e.getKey());
+                        if (v != null && v.equals(e.getValue())) result.remove(e.getKey());
+                        else if (v == null && e.getValue() == null && result.containsKey(e.getKey())) result.remove(e.getKey());
+                    }
+                    return new HstoreValue(result);
+                }
+                return h.deleteKey(key.toString());
+            }
+            case "slice": {
+                requireExtension("hstore", name, fn.args().size());
+                Object val = executor.evalExpr(fn.args().get(0), ctx);
+                Object keysObj = executor.evalExpr(fn.args().get(1), ctx);
+                if (val == null) return null;
+                HstoreValue h = toHstore(val);
+                List<String> keys = new ArrayList<>();
+                if (keysObj instanceof List) {
+                    for (Object k : (List<?>) keysObj) keys.add(k != null ? k.toString() : null);
+                }
+                return h.slice(keys);
+            }
+            case "populate_record": {
+                requireExtension("hstore", name, fn.args().size());
+                if (fn.args().size() != 2)
+                    throw new MemgresException("function populate_record requires 2 arguments", "42883");
+                String typeName = executor.resolveCompositeTypeName(fn.args().get(0), ctx);
+                Object baseArg = executor.evalExpr(fn.args().get(0), ctx);
+                Object hstoreArg = executor.evalExpr(fn.args().get(1), ctx);
+                HstoreValue hs = (hstoreArg == null)
+                        ? new HstoreValue(new java.util.LinkedHashMap<>()) : toHstore(hstoreArg);
+                java.util.List<CreateTypeStmt.CompositeField> fields =
+                        executor.compositeTypeHandler.resolveFieldsForType(typeName);
+                if (fields == null)
+                    throw new MemgresException("first argument of populate_record must be a row type", "42846");
+                return executor.compositeTypeHandler.populateFromHstore(baseArg, hs, fields);
+            }
+            case "hstore": {
+                requireExtension("hstore", name, fn.args().size());
+                if (fn.args().size() == 2) {
+                    // hstore(keys text[], vals text[]) or hstore(key text, val text)
+                    Object keysObj = executor.evalExpr(fn.args().get(0), ctx);
+                    Object valsObj = executor.evalExpr(fn.args().get(1), ctx);
+                    if (keysObj instanceof List && valsObj instanceof List) {
+                        List<?> keysList = (List<?>) keysObj;
+                        List<?> valsList = (List<?>) valsObj;
+                        java.util.Map<String, String> map = new java.util.LinkedHashMap<>();
+                        for (int i = 0; i < keysList.size(); i++) {
+                            String k = keysList.get(i) != null ? keysList.get(i).toString() : null;
+                            String v = i < valsList.size() && valsList.get(i) != null ? valsList.get(i).toString() : null;
+                            if (k != null) map.put(k, v);
+                        }
+                        return new HstoreValue(map);
+                    }
+                    // hstore(key text, val text) — single pair
+                    java.util.Map<String, String> map = new java.util.LinkedHashMap<>();
+                    if (keysObj != null) map.put(keysObj.toString(), valsObj != null ? valsObj.toString() : null);
+                    return new HstoreValue(map);
+                }
+                if (fn.args().size() == 1) {
+                    // hstore(text) or hstore(hstore) or hstore(text[]) — parse, pass through, or build from array
+                    Object rec = executor.evalExpr(fn.args().get(0), ctx);
+                    if (rec == null) return null;
+                    if (rec instanceof HstoreValue) return rec;
+                    // hstore(record) — convert composite type to hstore
+                    if (rec instanceof java.util.Map) {
+                        java.util.Map<String, String> hmap = new java.util.LinkedHashMap<>();
+                        for (java.util.Map.Entry<?, ?> e : ((java.util.Map<?, ?>) rec).entrySet()) {
+                            hmap.put(e.getKey().toString(), e.getValue() != null ? e.getValue().toString() : null);
+                        }
+                        return new HstoreValue(hmap);
+                    }
+                    if (rec instanceof AstExecutor.PgRow) {
+                        String typeName = executor.resolveCompositeTypeName(fn.args().get(0), ctx);
+                        java.util.List<CreateTypeStmt.CompositeField> fields =
+                                typeName != null ? executor.compositeTypeHandler.resolveFieldsForType(typeName) : null;
+                        if (fields != null) {
+                            AstExecutor.PgRow row = (AstExecutor.PgRow) rec;
+                            java.util.Map<String, String> hmap = new java.util.LinkedHashMap<>();
+                            for (int i = 0; i < fields.size() && i < row.values().size(); i++) {
+                                Object v = row.values().get(i);
+                                hmap.put(fields.get(i).name(), v != null ? v.toString() : null);
+                            }
+                            return new HstoreValue(hmap);
+                        }
+                        throw new MemgresException("could not determine composite type for hstore(record)", "42804");
+                    }
+                    if (rec instanceof List) {
+                        List<?> arr = (List<?>) rec;
+                        java.util.Map<String, String> map = new java.util.LinkedHashMap<>();
+                        if (!arr.isEmpty() && arr.get(0) instanceof List) {
+                            // 2D array: [[k1,v1],[k2,v2],...]
+                            for (Object row : arr) {
+                                List<?> pair = (List<?>) row;
+                                if (pair.size() >= 2) {
+                                    String k = pair.get(0) != null ? pair.get(0).toString() : null;
+                                    String v = pair.get(1) != null ? pair.get(1).toString() : null;
+                                    if (k != null) map.put(k, v);
+                                }
+                            }
+                        } else {
+                            // Flat alternating array: [k1,v1,k2,v2,...]
+                            for (int i = 0; i + 1 < arr.size(); i += 2) {
+                                String k = arr.get(i) != null ? arr.get(i).toString() : null;
+                                String v = arr.get(i + 1) != null ? arr.get(i + 1).toString() : null;
+                                if (k != null) map.put(k, v);
+                            }
+                        }
+                        return new HstoreValue(map);
+                    }
+                    return HstoreValue.parse(rec.toString());
+                }
+                throw new MemgresException("function hstore() requires 1 or 2 arguments", "42883");
+            }
+            case "hstore_to_json": {
+                requireExtension("hstore", name, fn.args().size());
+                Object val = executor.evalExpr(fn.args().get(0), ctx);
+                if (val == null) return null;
+                HstoreValue h = toHstore(val);
+                return hstoreToJsonString(h);
+            }
+            case "hstore_to_jsonb": {
+                requireExtension("hstore", name, fn.args().size());
+                Object val = executor.evalExpr(fn.args().get(0), ctx);
+                if (val == null) return null;
+                HstoreValue h = toHstore(val);
+                return hstoreToJsonString(h);
+            }
+            case "hstore_to_json_loose":
+            case "hstore_to_jsonb_loose": {
+                requireExtension("hstore", name, fn.args().size());
+                Object val = executor.evalExpr(fn.args().get(0), ctx);
+                if (val == null) return null;
+                HstoreValue h = toHstore(val);
+                return hstoreToJsonLooseString(h);
+            }
+            case "hstore_to_array": {
+                requireExtension("hstore", name, fn.args().size());
+                Object val = executor.evalExpr(fn.args().get(0), ctx);
+                if (val == null) return null;
+                HstoreValue h = toHstore(val);
+                // Returns flat array: {k1, v1, k2, v2, ...}
+                List<String> result = new ArrayList<>();
+                for (java.util.Map.Entry<String, String> e : h.getData().entrySet()) {
+                    result.add(e.getKey());
+                    result.add(e.getValue());
+                }
+                return result;
+            }
+            case "hstore_to_matrix": {
+                requireExtension("hstore", name, fn.args().size());
+                Object val = executor.evalExpr(fn.args().get(0), ctx);
+                if (val == null) return null;
+                HstoreValue h = toHstore(val);
+                // Returns 2D array: {{k1,v1},{k2,v2},...}
+                List<List<String>> result = new ArrayList<>();
+                for (java.util.Map.Entry<String, String> e : h.getData().entrySet()) {
+                    List<String> pair = new ArrayList<>();
+                    pair.add(e.getKey());
+                    pair.add(e.getValue());
+                    result.add(pair);
+                }
+                return result;
             }
 
             default: {
