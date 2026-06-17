@@ -3407,47 +3407,75 @@ RESULT: 2 columns, 1 rows
 COLUMNS: ?column?, ?column?
 ROW: t | t
 --- STMT 28 ---
+SQL: -- enum array-literal casts: quoted elements must be unquoted before the -- per-element enum input conversion (pgjdbc serialises array params quoted) SELECT '{sad,happy}'::mood[]
+RESULT: 1 columns, 1 rows
+COLUMNS: mood
+ROW: {sad,happy}
+--- STMT 29 ---
+SQL: SELECT '{"sad","happy"}'::mood[]
+RESULT: 1 columns, 1 rows
+COLUMNS: mood
+ROW: {sad,happy}
+--- STMT 30 ---
+SQL: SELECT '{ "sad" , "happy" }'::mood[]
+RESULT: 1 columns, 1 rows
+COLUMNS: mood
+ROW: {sad,happy}
+--- STMT 31 ---
+SQL: SELECT ARRAY['ok'::mood] = '{"ok"}'::mood[]
+RESULT: 1 columns, 1 rows
+COLUMNS: ?column?
+ROW: t
+--- STMT 32 ---
+SQL: SELECT 'ok'::mood = ANY('{"sad","ok"}'::mood[])
+RESULT: 1 columns, 1 rows
+COLUMNS: ?column?
+ROW: t
+--- STMT 33 ---
+SQL: SELECT '{"sad","nope"}'::mood[]
+ERROR [22P02]: ERROR: invalid input value for enum mood: "nope"
+--- STMT 34 ---
 SQL: -- more composite/row expansion CREATE FUNCTION get_addr(i int) RETURNS addr LANGUAGE SQL AS $$ SELECT home FROM people WHERE id = i $$
 OK: 0 rows affected
---- STMT 29 ---
+--- STMT 35 ---
 SQL: SELECT (get_addr(1)).street, (get_addr(1)).zip
 RESULT: 2 columns, 1 rows
 COLUMNS: street, zip
 ROW: Main | 12345
---- STMT 30 ---
+--- STMT 36 ---
 SQL: SELECT (people.home).* FROM people ORDER BY id
 RESULT: 2 columns, 2 rows
 COLUMNS: street, zip
 ROW: Main | 12345
 ROW: Side | 54321
---- STMT 31 ---
+--- STMT 37 ---
 SQL: -- bad domain/enum/composite cases INSERT INTO people(id, name, age, moods, home, info, lucky) VALUES (3, 'toolong', 1, ARRAY['ok'::mood], ROW('Road', 1), ROW('C', ROW('Road', 1)), ARRAY[1])
 ERROR [23514]: ERROR: value for domain shorttxt violates check constraint "shorttxt_check"
---- STMT 32 ---
+--- STMT 38 ---
 SQL: INSERT INTO people(id, name, age, moods, home, info, lucky) VALUES (4, 'ed', 0, ARRAY['ok'::mood], ROW('Road', 1), ROW('D', ROW('Road', 1)), ARRAY[1])
 ERROR [23514]: ERROR: value for domain posint violates check constraint "posint_check"
---- STMT 33 ---
+--- STMT 39 ---
 SQL: INSERT INTO people(id, name, age, moods, home, info, lucky) VALUES (5, 'ed', 1, ARRAY['nope'::mood], ROW('Road', 1), ROW('E', ROW('Road', 1)), ARRAY[1])
 ERROR [22P02]: ERROR: invalid input value for enum mood: "nope"
---- STMT 34 ---
+--- STMT 40 ---
 SQL: INSERT INTO people(id, name, age, moods, home, info, lucky) VALUES (6, 'ed', 1, ARRAY['ok'::mood], ROW('Road', 1), ROW('F', ROW('Road', 1)), ARRAY[]::int[])
 OK: 1 rows affected
---- STMT 35 ---
+--- STMT 41 ---
 SQL: SELECT ROW('x', 1, 2)::addr
 ERROR [42846]: ERROR: cannot cast type record to addr
---- STMT 36 ---
+--- STMT 42 ---
 SQL: SELECT (ROW('Main', 12345)::addr).nope
 ERROR [42703]: ERROR: column "nope" not found in data type addr
---- STMT 37 ---
+--- STMT 43 ---
 SQL: SELECT ARRAY['sad'::mood, 'nope'::mood]
 ERROR [22P02]: ERROR: invalid input value for enum mood: "nope"
---- STMT 38 ---
+--- STMT 44 ---
 SQL: SELECT 'missing'::mood
 ERROR [22P02]: ERROR: invalid input value for enum mood: "missing"
---- STMT 39 ---
+--- STMT 45 ---
 SQL: ALTER TYPE mood ADD VALUE 'ok'
 ERROR [42710]: ERROR: enum label "ok" already exists
---- STMT 40 ---
+--- STMT 46 ---
 SQL: DROP SCHEMA compat CASCADE
 OK: 0 rows affected
 
@@ -3525,126 +3553,166 @@ RESULT: 2 columns, 1 rows
 COLUMNS: ?column?, ?column?
 ROW: t | t
 --- STMT 18 ---
+SQL: -- quoted array-literal element parsing: unquoting, embedded delimiters, -- escapes, surrounding whitespace, and mixed quoted/unquoted elements SELECT '{"a","b","c"}'::text[]
+RESULT: 1 columns, 1 rows
+COLUMNS: text
+ROW: {a,b,c}
+--- STMT 19 ---
+SQL: SELECT '{a,"b",c}'::text[]
+RESULT: 1 columns, 1 rows
+COLUMNS: text
+ROW: {a,b,c}
+--- STMT 20 ---
+SQL: SELECT '{ "x" , "y" }'::text[]
+RESULT: 1 columns, 1 rows
+COLUMNS: text
+ROW: {x,y}
+--- STMT 21 ---
+SQL: SELECT '{"a,b","c"}'::text[]
+RESULT: 1 columns, 1 rows
+COLUMNS: text
+ROW: {"a,b",c}
+--- STMT 22 ---
+SQL: SELECT '{"1","2","3"}'::int[]
+RESULT: 1 columns, 1 rows
+COLUMNS: int4
+ROW: {1,2,3}
+--- STMT 23 ---
+SQL: SELECT '{"a","b"}'::text[] = ARRAY['a','b']
+RESULT: 1 columns, 1 rows
+COLUMNS: ?column?
+ROW: t
+--- STMT 24 ---
+SQL: -- escaped quote/backslash inside a quoted element are resolved on input -- (compared by value to stay independent of array output re-quoting) SELECT '{"a\"b"}'::text[] = ARRAY['a"b']
+RESULT: 1 columns, 1 rows
+COLUMNS: ?column?
+ROW: t
+--- STMT 25 ---
+SQL: SELECT '{"c\\d"}'::text[] = ARRAY['c\d']
+RESULT: 1 columns, 1 rows
+COLUMNS: ?column?
+ROW: t
+--- STMT 26 ---
 SQL: -- deeper ranges and multiranges SELECT int4range(1,5,'[]'), int4range(1,5,'[)')
 RESULT: 2 columns, 1 rows
 COLUMNS: int4range, int4range
 ROW: [1,6) | [1,5)
---- STMT 19 ---
+--- STMT 27 ---
 SQL: SELECT isempty(int4range(1,1,'[)')), lower(int4range(1,5)), upper(int4range(1,5))
 RESULT: 3 columns, 1 rows
 COLUMNS: isempty, lower, upper
 ROW: t | 1 | 5
---- STMT 20 ---
+--- STMT 28 ---
 SQL: SELECT int4range(1,5) -|- int4range(5,8), int4range(1,5) * int4range(3,8)
 RESULT: 2 columns, 1 rows
 COLUMNS: ?column?, ?column?
 ROW: t | [3,5)
---- STMT 21 ---
+--- STMT 29 ---
 SQL: SELECT int4range(1,5) + int4range(5,8)
 RESULT: 1 columns, 1 rows
 COLUMNS: ?column?
 ROW: [1,8)
---- STMT 22 ---
+--- STMT 30 ---
 SQL: SELECT int4range(1,10) - int4range(3,7)
 ERROR [22000]: ERROR: result of range difference would not be contiguous
---- STMT 23 ---
+--- STMT 31 ---
 SQL: SELECT daterange(DATE '2024-01-01', DATE '2024-02-01')
 RESULT: 1 columns, 1 rows
 COLUMNS: daterange
 ROW: [2024-01-01,2024-02-01)
---- STMT 24 ---
+--- STMT 32 ---
 SQL: SELECT tstzrange(TIMESTAMPTZ '2024-01-01 00:00+00', TIMESTAMPTZ '2024-02-01 00:00+00')
 RESULT: 1 columns, 1 rows
 COLUMNS: tstzrange
 ROW: ["2024-01-01 00:00:00+00","2024-02-01 00:00:00+00")
---- STMT 25 ---
+--- STMT 33 ---
 SQL: SELECT multirange(int4range(1,5), int4range(10,15))
 RESULT: 1 columns, 1 rows
 COLUMNS: multirange
 ROW: {[1,5)}
---- STMT 26 ---
+--- STMT 34 ---
 SQL: SELECT int4multirange(int4range(1,5), int4range(5,8))
 RESULT: 1 columns, 1 rows
 COLUMNS: int4multirange
 ROW: {[1,8)}
---- STMT 27 ---
+--- STMT 35 ---
 SQL: -- deeper json/jsonb differences SELECT '{"a":1,"a":2}'::json, '{"a":1,"a":2}'::jsonb
 RESULT: 2 columns, 1 rows
 COLUMNS: json, jsonb
 ROW: {"a":1,"a":2} | {"a": 2}
---- STMT 28 ---
+--- STMT 36 ---
 SQL: SELECT '{"b":2,"a":1}'::jsonb = '{"a":1,"b":2}'::jsonb
 RESULT: 1 columns, 1 rows
 COLUMNS: ?column?
 ROW: t
---- STMT 29 ---
+--- STMT 37 ---
 SQL: SELECT jsonb_set('{"a":[1,2,3]}'::jsonb, '{a,1}', '99'::jsonb)
 RESULT: 1 columns, 1 rows
 COLUMNS: jsonb_set
 ROW: {"a": [1, 99, 3]}
---- STMT 30 ---
+--- STMT 38 ---
 SQL: SELECT jsonb_insert('{"a":[1,2,3]}'::jsonb, '{a,1}', '77'::jsonb)
 RESULT: 1 columns, 1 rows
 COLUMNS: jsonb_insert
 ROW: {"a": [1, 77, 2, 3]}
---- STMT 31 ---
+--- STMT 39 ---
 SQL: SELECT '{"a":1,"b":2}'::jsonb - 'a'
 RESULT: 1 columns, 1 rows
 COLUMNS: ?column?
 ROW: {"b": 2}
---- STMT 32 ---
+--- STMT 40 ---
 SQL: SELECT '{"a":[1,2,3]}'::jsonb #- '{a,1}'
 RESULT: 1 columns, 1 rows
 COLUMNS: ?column?
 ROW: {"a": [1, 3]}
---- STMT 33 ---
+--- STMT 41 ---
 SQL: SELECT jsonb_path_exists('{"a":[1,2,3]}'::jsonb, '$.a[*] ? (@ > 2)')
 RESULT: 1 columns, 1 rows
 COLUMNS: jsonb_path_exists
 ROW: t
---- STMT 34 ---
+--- STMT 42 ---
 SQL: SELECT jsonb_path_match('{"a":2}'::jsonb, 'exists($.a ? (@ == 2))')
 RESULT: 1 columns, 1 rows
 COLUMNS: jsonb_path_match
 ROW: t
---- STMT 35 ---
+--- STMT 43 ---
 SQL: SELECT jsonb_typeof('null'::jsonb), jsonb_typeof('{"a":1}'::jsonb->'a')
 RESULT: 2 columns, 1 rows
 COLUMNS: jsonb_typeof, jsonb_typeof
 ROW: null | number
---- STMT 36 ---
+--- STMT 44 ---
 SQL: SELECT ('{"a":null}'::jsonb)->'a', ('{"a":null}'::jsonb)->>'a'
 RESULT: 2 columns, 1 rows
 COLUMNS: ?column?, ?column?
 ROW: null | NULL
---- STMT 37 ---
+--- STMT 45 ---
 SQL: -- bad deeper cases SELECT ARRAY[1,2,3] @> ARRAY['x']
 ERROR [42883]: ERROR: operator does not exist: integer[] @> text[]
---- STMT 38 ---
+--- STMT 46 ---
 SQL: SELECT 2 = ANY(ARRAY['a','b'])
 ERROR [42883]: ERROR: operator does not exist: integer = text
---- STMT 39 ---
+--- STMT 47 ---
 SQL: SELECT int4range(1,5,'bad')
 ERROR [42601]: ERROR: range bound flags must be one of "[]", "[)", "(]", or "()"
---- STMT 40 ---
+--- STMT 48 ---
 SQL: SELECT int4range(1,5) * numrange(1,5)
 ERROR [42883]: ERROR: operator does not exist: int4range * numrange
---- STMT 41 ---
+--- STMT 49 ---
 SQL: SELECT jsonb_set('{"a":[1,2,3]}'::jsonb, 'not_a_path', '1'::jsonb)
 ERROR [22P02]: ERROR: malformed array literal: "not_a_path"
---- STMT 42 ---
+--- STMT 50 ---
 SQL: SELECT jsonb_insert('{"a":[1,2,3]}'::jsonb, '{a,x}', '1'::jsonb)
 ERROR [22P02]: ERROR: path element at position 2 is not an integer: "x"
---- STMT 43 ---
+--- STMT 51 ---
 SQL: SELECT jsonb_path_exists('{"a":[1,2,3]}'::jsonb, 'not a path')
 ERROR [42601]: ERROR: syntax error at or near "not" of jsonpath input
---- STMT 44 ---
+--- STMT 52 ---
 SQL: SELECT jsonb_path_match('{"a":2}'::jsonb, '$.a')
 ERROR [22038]: ERROR: jsonpath item method .boolean() can only be applied to a boolean, numeric, or string JSON item
---- STMT 45 ---
+--- STMT 53 ---
 SQL: SELECT '{"a":1}'::json - 'a'
 ERROR [42883]: ERROR: operator does not exist: json - json
---- STMT 46 ---
+--- STMT 54 ---
 SQL: DROP SCHEMA compat CASCADE
 OK: 0 rows affected
 

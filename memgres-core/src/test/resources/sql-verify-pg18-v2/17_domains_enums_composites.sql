@@ -60,6 +60,15 @@ ALTER TYPE mood ADD VALUE 'great';
 SELECT 'great'::mood;
 SELECT 'sad'::mood < 'ok'::mood, 'ok'::mood < 'happy'::mood;
 
+-- enum array-literal casts: quoted elements must be unquoted before the
+-- per-element enum input conversion (pgjdbc serialises array params quoted)
+SELECT '{sad,happy}'::mood[];
+SELECT '{"sad","happy"}'::mood[];
+SELECT '{ "sad" , "happy" }'::mood[];
+SELECT ARRAY['ok'::mood] = '{"ok"}'::mood[];
+SELECT 'ok'::mood = ANY('{"sad","ok"}'::mood[]);
+SELECT '{"sad","nope"}'::mood[];
+
 -- more composite/row expansion
 CREATE FUNCTION get_addr(i int) RETURNS addr
 LANGUAGE SQL

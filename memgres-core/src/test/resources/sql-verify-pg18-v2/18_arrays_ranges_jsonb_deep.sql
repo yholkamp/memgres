@@ -30,6 +30,19 @@ SELECT ARRAY[ROW(1,'a')::record, ROW(2,'b')::record];
 SELECT ARRAY['sad'::text, 'ok'::text];
 SELECT 2 = ANY(ARRAY[1,2,3]), 4 = ALL(ARRAY[4,4,4]);
 
+-- quoted array-literal element parsing: unquoting, embedded delimiters,
+-- escapes, surrounding whitespace, and mixed quoted/unquoted elements
+SELECT '{"a","b","c"}'::text[];
+SELECT '{a,"b",c}'::text[];
+SELECT '{ "x" , "y" }'::text[];
+SELECT '{"a,b","c"}'::text[];
+SELECT '{"1","2","3"}'::int[];
+SELECT '{"a","b"}'::text[] = ARRAY['a','b'];
+-- escaped quote/backslash inside a quoted element are resolved on input
+-- (compared by value to stay independent of array output re-quoting)
+SELECT '{"a\"b"}'::text[] = ARRAY['a"b'];
+SELECT '{"c\\d"}'::text[] = ARRAY['c\d'];
+
 -- deeper ranges and multiranges
 SELECT int4range(1,5,'[]'), int4range(1,5,'[)');
 SELECT isempty(int4range(1,1,'[)')), lower(int4range(1,5)), upper(int4range(1,5));
