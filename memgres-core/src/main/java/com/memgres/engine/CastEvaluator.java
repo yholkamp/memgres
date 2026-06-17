@@ -143,11 +143,12 @@ class CastEvaluator {
                 String inner = valStr.substring(1, valStr.length() - 1).trim();
                 if (inner.isEmpty()) {
                     list = Cols.listOf();
-                } else if (inner.startsWith("{")) {
-                    // Nested array (2D+): split on top-level commas respecting brace depth
-                    list = parseTopLevelArrayElements(inner);
                 } else {
-                    list = java.util.Arrays.asList(inner.split(","));
+                    // Split on top-level commas, respecting nested braces and
+                    // double-quoted elements. Quoted elements are unquoted so the
+                    // per-element input conversion sees the raw value (matching PG):
+                    // '{"api","auto"}'::enum[] must look up labels api/auto, not "api".
+                    list = splitArrayLiteralElements(inner);
                 }
             } else {
                 list = null;
@@ -942,24 +943,59 @@ class CastEvaluator {
     }
 
     /**
-     * Parse top-level elements from a nested array inner string like "{1,2},{3,4}".
-     * Splits on commas that are at brace depth 0 only.
+     * Split a PostgreSQL array-literal inner string (the text between the outer
+     * braces) into its top-level elements. Commas inside nested braces or inside
+     * double-quoted elements do not split. Quoted elements are unquoted: the
+     * surrounding double-quotes are removed and backslash escapes resolved, so
+     * the caller sees the raw value. Unquoted elements are whitespace-trimmed.
+     * Handles both flat literals ("api,auto", "\"api\",\"auto\"") and nested
+     * ones ("{1,2},{3,4}").
      */
-    private static List<String> parseTopLevelArrayElements(String inner) {
+    private static List<String> splitArrayLiteralElements(String inner) {
         List<String> result = new ArrayList<>();
         int depth = 0;
+        boolean inQuotes = false;
         int start = 0;
         for (int i = 0; i < inner.length(); i++) {
             char c = inner.charAt(i);
-            if (c == '{') depth++;
-            else if (c == '}') depth--;
-            else if (c == ',' && depth == 0) {
-                result.add(inner.substring(start, i).trim());
+            if (inQuotes) {
+                if (c == '\\') i++; // skip the escaped character
+                else if (c == '"') inQuotes = false;
+            } else if (c == '"') {
+                inQuotes = true;
+            } else if (c == '{') {
+                depth++;
+            } else if (c == '}') {
+                depth--;
+            } else if (c == ',' && depth == 0) {
+                result.add(unquoteArrayElement(inner.substring(start, i)));
                 start = i + 1;
             }
         }
-        result.add(inner.substring(start).trim());
+        result.add(unquoteArrayElement(inner.substring(start)));
         return result;
+    }
+
+    /**
+     * Trim an array element token and, if it is double-quoted, strip the quotes
+     * and resolve backslash escapes (\" -> ", \\ -> \).
+     */
+    private static String unquoteArrayElement(String raw) {
+        String t = raw.trim();
+        if (t.length() >= 2 && t.charAt(0) == '"' && t.charAt(t.length() - 1) == '"') {
+            StringBuilder sb = new StringBuilder(t.length() - 2);
+            int end = t.length() - 1;
+            for (int i = 1; i < end; i++) {
+                char c = t.charAt(i);
+                if (c == '\\' && i + 1 < end) {
+                    sb.append(t.charAt(++i));
+                } else {
+                    sb.append(c);
+                }
+            }
+            return sb.toString();
+        }
+        return t;
     }
 
     /** Parse array elements from an inner string (between braces), handling quoted strings. */

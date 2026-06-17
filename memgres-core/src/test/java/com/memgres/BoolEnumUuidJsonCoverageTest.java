@@ -317,6 +317,50 @@ class BoolEnumUuidJsonCoverageTest {
     }
 
     @Test
+    void enum_array_quoted_literal_elements() throws SQLException {
+        // Regression: quoted array-literal elements must be unquoted before the
+        // per-element enum input conversion (pgjdbc serialises array params quoted).
+        try (Statement s = conn.createStatement()) {
+            s.execute("CREATE TYPE result_type AS ENUM ('manual','api','auto')");
+            // Quoted elements (the failing case) must work...
+            ResultSet rs = s.executeQuery("SELECT '{\"api\",\"auto\"}'::result_type[]");
+            assertTrue(rs.next());
+            assertEquals("{api,auto}", rs.getString(1));
+            // ...and still match the unquoted literal and scalar cast.
+            rs = s.executeQuery("SELECT '{api,auto}'::result_type[]");
+            assertTrue(rs.next());
+            assertEquals("{api,auto}", rs.getString(1));
+            rs = s.executeQuery("SELECT 'api'::result_type");
+            assertTrue(rs.next());
+            assertEquals("api", rs.getString(1));
+            s.execute("DROP TYPE result_type");
+        }
+    }
+
+    @Test
+    void enum_array_quoted_elements_via_any_param() throws SQLException {
+        // The real-world trigger: ANY(?::enum[]) with a bound String[] parameter,
+        // which pgjdbc serialises with quoted elements.
+        try (Statement s = conn.createStatement()) {
+            s.execute("CREATE TYPE result_type_any AS ENUM ('manual','api','auto')");
+            s.execute("CREATE TABLE t_any (id SERIAL, type result_type_any)");
+            s.execute("INSERT INTO t_any (type) VALUES ('manual'), ('api'), ('auto')");
+        }
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT id FROM t_any WHERE type = ANY(?::result_type_any[]) ORDER BY id")) {
+            ps.setArray(1, conn.createArrayOf("text", new String[]{"api", "auto"}));
+            ResultSet rs = ps.executeQuery();
+            assertTrue(rs.next()); assertEquals(2, rs.getInt(1));
+            assertTrue(rs.next()); assertEquals(3, rs.getInt(1));
+            assertFalse(rs.next());
+        }
+        try (Statement s = conn.createStatement()) {
+            s.execute("DROP TABLE t_any");
+            s.execute("DROP TYPE result_type_any");
+        }
+    }
+
+    @Test
     void enum_order_by() throws SQLException {
         try (Statement s = conn.createStatement()) {
             s.execute("CREATE TYPE mood_ord AS ENUM ('sad', 'ok', 'happy')");
