@@ -1264,10 +1264,60 @@ class DdlParser {
 
     // ---- Shared utilities ----
 
+    /**
+     * Read a single partition-bound value. Besides MINVALUE/MAXVALUE and plain
+     * literals, this accepts the constant forms PostgreSQL allows as bounds:
+     * typed literals ({@code DATE '2026-04-01'}), casts ({@code '2026-04-01'::date})
+     * and signed numbers ({@code -100}). The value is normalised to its bare literal
+     * (the type annotation is dropped) so it round-trips through
+     * {@link DdlExecutor#parseBoundValue(String)}.
+     */
     static String readValueOrMinMax(Parser parser) {
         if (parser.checkKeyword("MINVALUE")) { parser.advance(); return "MINVALUE"; }
         if (parser.checkKeyword("MAXVALUE")) { parser.advance(); return "MAXVALUE"; }
-        return parser.advance().value();
+
+        // Signed numeric literal: -100, +5, -1.5
+        if ((parser.check(TokenType.MINUS) || parser.check(TokenType.PLUS))
+                && parser.pos + 1 < parser.tokens.size()
+                && (parser.tokens.get(parser.pos + 1).type() == TokenType.INTEGER_LITERAL
+                    || parser.tokens.get(parser.pos + 1).type() == TokenType.FLOAT_LITERAL)) {
+            String sign = parser.advance().value();
+            String num = parser.advance().value();
+            skipBoundCast(parser);
+            return sign + num;
+        }
+
+        // Typed literal: DATE '2026-04-01', TIMESTAMP '2026-04-01 00:00:00', INTERVAL '1 day'.
+        // The type name is followed by a string literal; keep only the literal value.
+        Token cur = parser.peek();
+        Token next = parser.pos + 1 < parser.tokens.size() ? parser.tokens.get(parser.pos + 1) : null;
+        if ((cur.type() == TokenType.KEYWORD || cur.type() == TokenType.IDENTIFIER)
+                && next != null && next.type() == TokenType.STRING_LITERAL) {
+            parser.advance();                    // consume the type name
+            String value = parser.advance().value(); // string-literal content (quotes already stripped)
+            skipBoundCast(parser);
+            return value;
+        }
+
+        // Plain literal (string / number / boolean / NULL), optionally followed by a ::type cast.
+        String value = parser.advance().value();
+        skipBoundCast(parser);
+        return value;
+    }
+
+    /** Consume an optional trailing {@code ::type} cast (e.g. {@code '2026-04-01'::date}) on a partition bound. */
+    private static void skipBoundCast(Parser parser) {
+        if (!parser.match(TokenType.CAST)) return;
+        parser.advance(); // base type name
+        while (parser.match(TokenType.DOT)) parser.advance(); // schema-qualified name
+        if (parser.match(TokenType.LEFT_PAREN)) {             // length/precision, e.g. varchar(10)
+            while (!parser.check(TokenType.RIGHT_PAREN) && !parser.isAtEnd()) parser.advance();
+            parser.match(TokenType.RIGHT_PAREN);
+        }
+        while (parser.match(TokenType.LEFT_BRACKET)) {        // array brackets, e.g. int[]
+            while (!parser.check(TokenType.RIGHT_BRACKET) && !parser.isAtEnd()) parser.advance();
+            parser.match(TokenType.RIGHT_BRACKET);
+        }
     }
 
     // ---- CREATE OPERATOR ----

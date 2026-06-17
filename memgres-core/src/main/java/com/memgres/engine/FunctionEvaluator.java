@@ -478,27 +478,53 @@ class FunctionEvaluator {
                 Object startObj = executor.evalExpr(fn.args().get(0), ctx);
                 Object stopObj = executor.evalExpr(fn.args().get(1), ctx);
                 Object stepObj = fn.args().size() > 2 ? executor.evalExpr(fn.args().get(2), ctx) : null;
-                // Date/timestamp overload: generate_series(start_date, end_date, interval)
-                if (startObj instanceof LocalDate || startObj instanceof LocalDateTime) {
-                    LocalDateTime start = startObj instanceof LocalDate ? ((LocalDate) startObj).atStartOfDay() : (LocalDateTime) startObj;
-                    LocalDateTime stop = stopObj instanceof LocalDate ? ((LocalDate) stopObj).atStartOfDay() : TypeCoercion.toLocalDateTime(stopObj);
+                // timestamptz overload: generate_series(timestamptz, timestamptz, interval) → timestamptz.
+                // now() and '...'::timestamptz evaluate to OffsetDateTime; preserve the offset.
+                if (startObj instanceof OffsetDateTime) {
+                    OffsetDateTime start = (OffsetDateTime) startObj;
+                    OffsetDateTime stop = TypeCoercion.toOffsetDateTime(stopObj);
                     PgInterval step = stepObj != null ? TypeCoercion.toInterval(stepObj) : new PgInterval(0, 1, 0);
                     List<Object> result = new ArrayList<>();
-                    LocalDateTime cur = start;
-                    for (int i = 0; i < 10000 && !cur.isAfter(stop); i++) {
-                        result.add(startObj instanceof LocalDate ? cur.toLocalDate() : cur);
-                        cur = step.addTo(cur);
+                    boolean ascending = step.addTo(start).isAfter(start);
+                    OffsetDateTime cur = start;
+                    for (int i = 0; i < 10000; i++) {
+                        if (ascending ? cur.isAfter(stop) : cur.isBefore(stop)) break;
+                        result.add(cur);
+                        OffsetDateTime next = step.addTo(cur);
+                        if (next.isEqual(cur)) break; // zero interval guard
+                        cur = next;
                     }
                     return result;
                 }
-                // Numeric overload, reject non-numeric args
-                if (startObj instanceof String && !((String) startObj).isEmpty() && !Character.isDigit(((String) startObj).charAt(0)) && ((String) startObj).charAt(0) != '-') {
-                    String s = (String) startObj;
+                // Date/timestamp overload: generate_series(timestamp, timestamp, interval). Also fires for
+                // bare date/timestamp string literals once an interval step disambiguates from the integer form.
+                if (startObj instanceof LocalDate || startObj instanceof LocalDateTime || stepObj instanceof PgInterval) {
+                    boolean dateInput = startObj instanceof LocalDate;
+                    LocalDateTime start = dateInput ? ((LocalDate) startObj).atStartOfDay() : TypeCoercion.toLocalDateTime(startObj);
+                    LocalDateTime stop = stopObj instanceof LocalDate ? ((LocalDate) stopObj).atStartOfDay() : TypeCoercion.toLocalDateTime(stopObj);
+                    PgInterval step = stepObj != null ? TypeCoercion.toInterval(stepObj) : new PgInterval(0, 1, 0);
+                    List<Object> result = new ArrayList<>();
+                    boolean ascending = step.addTo(start).isAfter(start);
+                    LocalDateTime cur = start;
+                    for (int i = 0; i < 10000; i++) {
+                        if (ascending ? cur.isAfter(stop) : cur.isBefore(stop)) break;
+                        result.add(dateInput ? cur.toLocalDate() : cur);
+                        LocalDateTime next = step.addTo(cur);
+                        if (next.isEqual(cur)) break; // zero interval guard
+                        cur = next;
+                    }
+                    return result;
+                }
+                // Integer overload. Non-numeric args (e.g. a bare date string with no
+                // interval step) are ambiguous and rejected, matching the FROM-clause path.
+                long start, stop, step;
+                try {
+                    start = executor.toLong(startObj);
+                    stop = executor.toLong(stopObj);
+                    step = stepObj != null ? executor.toLong(stepObj) : 1;
+                } catch (NumberFormatException e) {
                     throw new MemgresException("function generate_series(unknown, unknown) is not unique", "42725");
                 }
-                long start = executor.toLong(startObj);
-                long stop = executor.toLong(stopObj);
-                long step = stepObj != null ? executor.toLong(stepObj) : 1;
                 List<Object> result = new ArrayList<>();
                 if (step > 0) {
                     for (long v = start; v <= stop; v += step) {

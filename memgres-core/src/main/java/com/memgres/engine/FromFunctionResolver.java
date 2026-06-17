@@ -89,22 +89,49 @@ class FromFunctionResolver {
     // ---- generate_series ----
 
     private List<RowContext> resolveGenerateSeries(String alias, List<String> colAliases, List<Object> evalArgs) {
-        // Date/timestamp overload
-        if (evalArgs.get(0) instanceof java.time.LocalDate || evalArgs.get(0) instanceof java.time.LocalDateTime) {
-            java.time.LocalDateTime dtStart = evalArgs.get(0) instanceof java.time.LocalDate ? ((java.time.LocalDate) evalArgs.get(0)).atStartOfDay() : (java.time.LocalDateTime) evalArgs.get(0);
+        // timestamptz overload: preserve the actual offset from now()/'...'::timestamptz (OffsetDateTime).
+        if (evalArgs.get(0) instanceof java.time.OffsetDateTime) {
+            java.time.OffsetDateTime tzStart = (java.time.OffsetDateTime) evalArgs.get(0);
+            java.time.OffsetDateTime tzStop = TypeCoercion.toOffsetDateTime(evalArgs.get(1));
+            PgInterval ivStep = evalArgs.size() > 2 ? TypeCoercion.toInterval(evalArgs.get(2)) : new PgInterval(0, 1, 0);
+            String colName = firstColAlias(colAliases, alias);
+            Column col = new Column(colName, DataType.TIMESTAMPTZ, true, false, null);
+            Table virtualTable = new Table(alias, Cols.listOf(col));
+            List<RowContext> contexts = new ArrayList<>();
+            boolean ascending = ivStep.addTo(tzStart).isAfter(tzStart);
+            java.time.OffsetDateTime cur = tzStart;
+            for (int guard = 0; guard < 10000; guard++) {
+                if (ascending ? cur.isAfter(tzStop) : cur.isBefore(tzStop)) break;
+                Object[] row = new Object[]{cur};
+                virtualTable.insertRow(row);
+                contexts.add(new RowContext(virtualTable, alias, row));
+                java.time.OffsetDateTime next = ivStep.addTo(cur);
+                if (next.isEqual(cur)) break; // zero interval guard
+                cur = next;
+            }
+            return contexts;
+        }
+        // Date/timestamp overload (also bare date/timestamp strings once an interval step disambiguates).
+        if (evalArgs.get(0) instanceof java.time.LocalDate || evalArgs.get(0) instanceof java.time.LocalDateTime
+                || (evalArgs.size() > 2 && evalArgs.get(2) instanceof PgInterval)) {
+            java.time.LocalDateTime dtStart = evalArgs.get(0) instanceof java.time.LocalDate ? ((java.time.LocalDate) evalArgs.get(0)).atStartOfDay() : TypeCoercion.toLocalDateTime(evalArgs.get(0));
             java.time.LocalDateTime dtStop = evalArgs.get(1) instanceof java.time.LocalDate ? ((java.time.LocalDate) evalArgs.get(1)).atStartOfDay() : TypeCoercion.toLocalDateTime(evalArgs.get(1));
             PgInterval ivStep = evalArgs.size() > 2 ? TypeCoercion.toInterval(evalArgs.get(2)) : new PgInterval(0, 1, 0);
             String colName = firstColAlias(colAliases, alias);
             Column col = new Column(colName, DataType.TIMESTAMPTZ, true, false, null);
             Table virtualTable = new Table(alias, Cols.listOf(col));
             List<RowContext> contexts = new ArrayList<>();
+            boolean ascending = ivStep.addTo(dtStart).isAfter(dtStart);
             java.time.LocalDateTime cur = dtStart;
-            for (int guard = 0; guard < 10000 && !cur.isAfter(dtStop); guard++) {
+            for (int guard = 0; guard < 10000; guard++) {
+                if (ascending ? cur.isAfter(dtStop) : cur.isBefore(dtStop)) break;
                 Object val = cur.atZone(java.time.ZoneId.systemDefault()).toOffsetDateTime();
                 Object[] row = new Object[]{val};
                 virtualTable.insertRow(row);
                 contexts.add(new RowContext(virtualTable, alias, row));
-                cur = ivStep.addTo(cur);
+                java.time.LocalDateTime next = ivStep.addTo(cur);
+                if (next.isEqual(cur)) break; // zero interval guard
+                cur = next;
             }
             return contexts;
         }
