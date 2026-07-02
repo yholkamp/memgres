@@ -10,7 +10,7 @@ JUnit 5 extension for [Memgres](https://github.com/lhgravendeel/memgres) — an 
 <dependency>
     <groupId>com.memgres</groupId>
     <artifactId>memgres-junit5</artifactId>
-    <version>0.2.3</version>
+    <version>0.2.4</version>
     <scope>test</scope>
 </dependency>
 <dependency>
@@ -24,7 +24,7 @@ JUnit 5 extension for [Memgres](https://github.com/lhgravendeel/memgres) — an 
 ### Gradle
 
 ```groovy
-testImplementation 'com.memgres:memgres-junit5:0.2.3'
+testImplementation 'com.memgres:memgres-junit5:0.2.4'
 testImplementation 'org.postgresql:postgresql:42.7.5'
 ```
 

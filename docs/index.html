@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Memgres - In-Memory PostgreSQL for Java Testing</title>
-    <meta name="description" content="In-memory PostgreSQL-compatible database for Java testing. No Docker, no external processes. Millisecond startup, real PG wire protocol, 13,000+ tests.">
+    <meta name="description" content="In-memory PostgreSQL-compatible database for Java testing. No Docker, no external processes. Millisecond startup, real PG wire protocol, 13,300+ tests.">
     <meta property="og:title" content="Memgres - In-Memory PostgreSQL for Java Testing">
     <meta property="og:description" content="No Docker, no external processes. Just add the dependency and write tests against real PostgreSQL SQL.">
     <meta property="og:type" content="website">
@@ -477,7 +477,7 @@
             </div>
             <br>
             <div class="hero-install" onclick="copyInstall(this)" id="install-block">
-                <span id="install-text">com.memgres:memgres-junit5:0.2.3</span>
+                <span id="install-text">com.memgres:memgres-junit5:0.2.4</span>
                 <svg class="copy-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
                 <span class="copied-toast" id="copied-toast">Copied!</span>
             </div>
@@ -489,7 +489,7 @@
 <div class="container">
     <div class="stats">
         <div class="stat">
-            <div class="stat-value">13,000<span class="unit">+</span></div>
+            <div class="stat-value">13,300<span class="unit">+</span></div>
             <div class="stat-label">Passing tests</div>
         </div>
         <div class="stat">
@@ -717,7 +717,7 @@
         <div class="limitations">
             <div class="limitation">No persistence — fully in-memory by design</div>
             <div class="limitation">Btree indexes only (no GiST, GIN, BRIN)</div>
-            <div class="limitation">Built-in extensions only (uuid-ossp, pgcrypto, pg_trgm, fuzzystrmatch, unaccent). No C-based extensions (PostGIS, etc.)</div>
+            <div class="limitation">Built-in extensions only (uuid-ossp, pgcrypto, pg_trgm, fuzzystrmatch, unaccent, hstore). No C-based extensions (PostGIS, etc.)</div>
             <div class="limitation">No replication (WAL, streaming, or logical)</div>
             <div class="limitation">No foreign data wrappers or foreign tables</div>
             <div class="limitation">No tablespaces</div>
@@ -748,7 +748,7 @@
 <pre><span class="kw">&lt;dependency&gt;</span>
     <span class="kw">&lt;groupId&gt;</span><span class="st">com.memgres</span><span class="kw">&lt;/groupId&gt;</span>
     <span class="kw">&lt;artifactId&gt;</span><span class="st">memgres-junit5</span><span class="kw">&lt;/artifactId&gt;</span>
-    <span class="kw">&lt;version&gt;</span><span class="nr">0.2.3</span><span class="kw">&lt;/version&gt;</span>
+    <span class="kw">&lt;version&gt;</span><span class="nr">0.2.4</span><span class="kw">&lt;/version&gt;</span>
     <span class="kw">&lt;scope&gt;</span><span class="st">test</span><span class="kw">&lt;/scope&gt;</span>
 <span class="kw">&lt;/dependency&gt;</span></pre>
         </div>
@@ -773,8 +773,8 @@
 
 <script>
     const installs = {
-        maven: 'com.memgres:memgres-junit5:0.2.3',
-        gradle: "testImplementation 'com.memgres:memgres-junit5:0.2.3'"
+        maven: 'com.memgres:memgres-junit5:0.2.4',
+        gradle: "testImplementation 'com.memgres:memgres-junit5:0.2.4'"
     };
     let current = 'maven';
 
