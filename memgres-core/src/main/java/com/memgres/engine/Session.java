@@ -972,6 +972,16 @@ public class Session {
         return database;
     }
 
+    /**
+     * Resolves the stable OID for a named catalog object (e.g. {@code "type:" + enumTypeName})
+     * using this session's own {@link SystemCatalog}. Used by the wire-protocol layer to
+     * advertise the real per-type OID for custom enum columns in RowDescription, instead of a
+     * placeholder value the client can't resolve via a pg_type lookup.
+     */
+    public int resolveOid(String key) {
+        return executor.getSystemCatalog().getOid(key);
+    }
+
     public GucSettings getGucSettings() {
         return gucSettings;
     }

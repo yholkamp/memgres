@@ -1038,7 +1038,7 @@ public class PgWireHandler extends SimpleChannelInboundHandler<PgWireMessage> {
 
     private void sendRowDescription(ChannelHandlerContext ctx, QueryResult result) {
         ByteBuf buf = ctx.alloc().buffer();
-        PgWireValueFormatter.sendRowDescription(buf, result.getColumns());
+        PgWireValueFormatter.sendRowDescription(buf, result.getColumns(), session);
         ctx.write(buf);
     }
 
