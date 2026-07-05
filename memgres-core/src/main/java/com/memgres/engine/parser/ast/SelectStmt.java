@@ -392,12 +392,20 @@ public final class SelectStmt implements Statement {
         public final List<Expression> args;
         public final String alias;
         public final List<String> columnAliases;
+        /** True when the FROM item was written with the {@code WITH ORDINALITY} clause. */
+        public final boolean withOrdinality;
 
-        public FunctionFrom(String functionName, List<Expression> args, String alias, List<String> columnAliases) {
+        public FunctionFrom(String functionName, List<Expression> args, String alias, List<String> columnAliases,
+                             boolean withOrdinality) {
             this.functionName = functionName;
             this.args = args;
             this.alias = alias;
             this.columnAliases = columnAliases;
+            this.withOrdinality = withOrdinality;
+        }
+
+        public FunctionFrom(String functionName, List<Expression> args, String alias, List<String> columnAliases) {
+            this(functionName, args, alias, columnAliases, false);
         }
 
         public FunctionFrom(String functionName, List<Expression> args, String alias) {
@@ -408,6 +416,7 @@ public final class SelectStmt implements Statement {
         public List<Expression> args() { return args; }
         public String alias() { return alias; }
         public List<String> columnAliases() { return columnAliases; }
+        public boolean withOrdinality() { return withOrdinality; }
 
         @Override
         public boolean equals(Object o) {
@@ -417,17 +426,18 @@ public final class SelectStmt implements Statement {
             return java.util.Objects.equals(functionName, that.functionName)
                 && java.util.Objects.equals(args, that.args)
                 && java.util.Objects.equals(alias, that.alias)
-                && java.util.Objects.equals(columnAliases, that.columnAliases);
+                && java.util.Objects.equals(columnAliases, that.columnAliases)
+                && withOrdinality == that.withOrdinality;
         }
 
         @Override
         public int hashCode() {
-            return java.util.Objects.hash(functionName, args, alias, columnAliases);
+            return java.util.Objects.hash(functionName, args, alias, columnAliases, withOrdinality);
         }
 
         @Override
         public String toString() {
-            return "FunctionFrom[functionName=" + functionName + ", " + "args=" + args + ", " + "alias=" + alias + ", " + "columnAliases=" + columnAliases + "]";
+            return "FunctionFrom[functionName=" + functionName + ", " + "args=" + args + ", " + "alias=" + alias + ", " + "columnAliases=" + columnAliases + ", " + "withOrdinality=" + withOrdinality + "]";
         }
     }
 

@@ -22,10 +22,22 @@ class ExprEvaluator {
         this.executor = executor;
     }
 
+    /**
+     * Wraps an already-evaluated Java value so it can be threaded back through the normal
+     * expression evaluation machinery (e.g. as a synthetic argument to {@link FunctionCallExpr}),
+     * without re-parsing/re-evaluating it. Used by the attribute-notation fallback below.
+     */
+    static final class PrecomputedValueExpr implements Expression {
+        private final Object value;
+        PrecomputedValueExpr(Object value) { this.value = value; }
+        Object value() { return value; }
+    }
+
     // ---- Main expression dispatcher ----
 
     public Object evalExpr(Expression expr, RowContext ctx) {
         if (expr instanceof Literal) return evalLiteral(((Literal) expr));
+        if (expr instanceof PrecomputedValueExpr) return ((PrecomputedValueExpr) expr).value();
         if (expr instanceof ColumnRef) return evalColumnRef(((ColumnRef) expr), ctx);
         if (expr instanceof BinaryExpr) return executor.binaryOpEvaluator.evalBinary(((BinaryExpr) expr), ctx);
         if (expr instanceof UnaryExpr) return evalUnaryValue(((UnaryExpr) expr).op(), evalExpr(((UnaryExpr) expr).operand(), ctx));
@@ -479,6 +491,16 @@ class ExprEvaluator {
                 result = ctx.resolveColumn(ref.table(), ref.column());
                 foundInCurrent = true;
             } catch (MemgresException e) {
+                if ("42703".equals(e.getSqlState())) {
+                    // Column resolution failed for a valid alias/table: PostgreSQL falls back to
+                    // attribute notation here, i.e. alias.name ≡ name(alias) (e.g. gs.date ≡
+                    // date(gs) when gs is bound to a single-column FROM-function result such as
+                    // generate_series(...) AS gs(key)). Only attempt this when the qualifier really
+                    // is bound in the current context; otherwise rethrow the original error.
+                    Object fallback = tryAttributeNotationFallback(ctx, ref.table(), ref.column());
+                    if (fallback != ATTRIBUTE_NOTATION_NOT_APPLICABLE) return fallback;
+                    throw e;
+                }
                 if (!"42P01".equals(e.getSqlState())) throw e;
                 // table not in current context, will try outer contexts below
             }
@@ -509,6 +531,46 @@ class ExprEvaluator {
             // Not found in any context; throw the original error
             throw new MemgresException("missing FROM-clause entry for table \"" + ref.table() + "\"", "42P01");
         }
+    }
+
+    /** Sentinel returned by {@link #tryAttributeNotationFallback} when the fallback does not apply. */
+    private static final Object ATTRIBUTE_NOTATION_NOT_APPLICABLE = new Object();
+
+    /**
+     * PostgreSQL's qualified-name resolution tries a column first, then falls back to attribute
+     * notation: {@code alias.name} is read as {@code name(alias)} — calling the single-arg
+     * cast/function {@code name} on the whole-row value bound to {@code alias}. This is how
+     * {@code gs.date} resolves against {@code FROM generate_series(...) AS gs(key)}: the aliased
+     * column is named {@code key}, so {@code gs.date} isn't a column, but {@code date(gs)} (cast
+     * the row's single timestamp value to a date) is valid and is exactly what PostgreSQL returns.
+     * <p>
+     * Scoped to FROM-item aliases bound to a single-column virtual table (as produced by FROM
+     * set-returning functions like {@code generate_series}/{@code unnest}), matching the concrete
+     * defect this resolves. Returns {@link #ATTRIBUTE_NOTATION_NOT_APPLICABLE} when the qualifier
+     * isn't bound in {@code ctx}, doesn't have exactly one column, or {@code name} isn't a
+     * recognized cast type name or registered function — callers should then raise the original
+     * "column X.Y does not exist" error.
+     */
+    private Object tryAttributeNotationFallback(RowContext ctx, String tableQualifier, String funcOrCastName) {
+        RowContext.TableBinding binding = ctx.getBinding(tableQualifier);
+        if (binding == null) return ATTRIBUTE_NOTATION_NOT_APPLICABLE;
+        List<Column> cols = binding.table().getColumns();
+        if (cols.size() != 1) return ATTRIBUTE_NOTATION_NOT_APPLICABLE;
+        Object rowValue = binding.row()[0];
+        // Try funcOrCastName as a cast/type-name function: date(ts), text(x), numeric(x), timestamp(x), ...
+        try {
+            return executor.castEvaluator.applyCast(rowValue, funcOrCastName);
+        } catch (MemgresException castFailed) {
+            // Not a recognized type name; fall through to try a registered scalar function below.
+        }
+        // Try funcOrCastName as a regular single-arg user-defined function.
+        PgFunction userFunc = executor.database.getFunction(funcOrCastName.toLowerCase());
+        if (userFunc != null) {
+            FunctionCallExpr synthetic = new FunctionCallExpr(
+                    funcOrCastName, Cols.listOf(new PrecomputedValueExpr(rowValue)));
+            return executor.functionEvaluator.evalFunction(synthetic, ctx);
+        }
+        return ATTRIBUTE_NOTATION_NOT_APPLICABLE;
     }
 
     /**
