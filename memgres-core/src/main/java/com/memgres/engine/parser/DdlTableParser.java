@@ -494,7 +494,7 @@ class DdlTableParser {
                 }
             }
             parser.expect(TokenType.LEFT_PAREN);
-            List<String> cols = parser.parseIdentifierList();
+            List<String> cols = parser.parseColumnOrExpressionList();
             parser.expect(TokenType.RIGHT_PAREN);
             boolean uqDeferrable = false, uqInitiallyDeferred = false;
             if (parser.matchKeyword("DEFERRABLE")) {

@@ -418,6 +418,60 @@ public class ExpressionParser {
         return list;
     }
 
+    /**
+     * Parses a comma-separated column list where any entry may instead be a parenthesized
+     * expression, e.g. {@code UNIQUE (id, (data->>'k'))} or an ON CONFLICT target list.
+     * Plain entries are captured as bare identifier text; expression entries are captured as
+     * their reconstructed source text (with exactly one layer of wrapping parens stripped).
+     * Sets {@link #lastColumnListHadExpression} so callers can tell whether any entry was an
+     * expression (vs. a plain identifier).
+     */
+    protected boolean lastColumnListHadExpression;
+
+    protected List<String> parseColumnOrExpressionList() {
+        List<String> list = new ArrayList<>();
+        boolean anyExpr = false;
+        do {
+            if (check(TokenType.LEFT_PAREN)) {
+                anyExpr = true;
+                expect(TokenType.LEFT_PAREN);
+                int exprStart = pos;
+                parseExpression();
+                StringBuilder sb = new StringBuilder();
+                for (int i = exprStart; i < pos; i++) {
+                    if (i > exprStart) {
+                        Token prev = tokens.get(i - 1);
+                        Token cur = tokens.get(i);
+                        if (prev.type() != TokenType.LEFT_PAREN && cur.type() != TokenType.RIGHT_PAREN
+                                && cur.type() != TokenType.COMMA && prev.type() != TokenType.COMMA) {
+                            sb.append(' ');
+                        }
+                    }
+                    sb.append(columnListTokenValue(tokens.get(i)));
+                }
+                list.add(sb.toString());
+                expect(TokenType.RIGHT_PAREN);
+            } else {
+                list.add(readIdentifier());
+            }
+        } while (match(TokenType.COMMA));
+        lastColumnListHadExpression = anyExpr;
+        return list;
+    }
+
+    /**
+     * Renders a token's source text for reconstruction in {@link #parseColumnOrExpressionList()}.
+     * String literal tokens store their unquoted content (see {@code Lexer}), so they must be
+     * re-quoted here or the reconstructed expression text silently turns e.g. {@code 'k'} into
+     * the bare identifier {@code k} — which then fails to parse/evaluate as a string constant.
+     */
+    private static String columnListTokenValue(Token t) {
+        if (t.type() == TokenType.STRING_LITERAL) {
+            return "'" + t.value().replace("'", "''") + "'";
+        }
+        return t.value();
+    }
+
     // ---- Subquery hook (overridden by Parser) ----
 
     /**

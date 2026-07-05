@@ -139,6 +139,27 @@ class DdlExecutor {
                 List<String> cols = resolveConstraintColumns(tc.columns());
                 if (name == null) name = tableName + "_" + String.join("_", cols) + "_key";
                 StoredConstraint sc = StoredConstraint.unique(name, cols);
+                // For expression-based UNIQUE constraints (e.g. UNIQUE (id, (data->>'k'))),
+                // parse every column entry (plain identifiers included) as an expression so
+                // uniqueness enforcement and ON CONFLICT matching can evaluate/compare them
+                // structurally. Mirrors the detection used for CREATE UNIQUE INDEX.
+                boolean hasExprCols = cols.stream().anyMatch(c ->
+                        c.contains("(") || c.contains(" ") || c.contains("+") || c.contains("-")
+                        || c.contains("*") || c.contains("/") || c.contains("||"));
+                if (hasExprCols) {
+                    List<Expression> exprCols = new ArrayList<>();
+                    for (String col : cols) {
+                        try {
+                            exprCols.add(com.memgres.engine.parser.Parser.parseExpression(col));
+                        } catch (Exception e) {
+                            exprCols = null;
+                            break;
+                        }
+                    }
+                    if (exprCols != null) {
+                        sc.setExpressionColumns(exprCols);
+                    }
+                }
                 if (tc.nullsNotDistinct()) sc.setNullsNotDistinct(true);
                 if (tc.deferrable()) {
                     sc.setDeferrable(true);
