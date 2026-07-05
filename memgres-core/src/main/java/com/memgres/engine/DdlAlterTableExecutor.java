@@ -438,6 +438,24 @@ class DdlAlterTableExecutor {
     private void executeSetType(AlterTableStmt.AlterColumn alterCol, AlterTableStmt.SetType setType,
                                  Table table, AlterTableStmt stmt, String schemaName) {
         String baseType = setType.typeName().replaceAll("\\(.*\\)", "").replace("[]", "").trim();
+        // Extract the new type's typmod (precision/scale) so it replaces the old column's —
+        // e.g. ALTER COLUMN capacity TYPE numeric(10, 2) must set precision 10 / scale 2, or
+        // NUMERIC storage coercion (TypeCoercion.applyPrecision) never enforces the declared
+        // scale and values round-trip at whatever incidental scale they arrived with.
+        Integer newPrecision = null;
+        Integer newScale = null;
+        java.util.regex.Matcher typmod = java.util.regex.Pattern
+                .compile("\\(\\s*(\\d+)\\s*(?:,\\s*(-?\\d+)\\s*)?\\)")
+                .matcher(setType.typeName());
+        if (typmod.find()) {
+            try {
+                newPrecision = Integer.valueOf(typmod.group(1));
+                if (typmod.group(2) != null) newScale = Integer.valueOf(typmod.group(2));
+            } catch (NumberFormatException ignored) {
+                newPrecision = null;
+                newScale = null;
+            }
+        }
         DataType dt = DataType.fromPgName(baseType);
         if (dt == null) {
             if (executor.database.isCustomEnum(baseType)) {
@@ -508,7 +526,7 @@ class DdlAlterTableExecutor {
                 RowContext ctx = new RowContext(table, null, row);
                 convertedValues[ri] = executor.evalExpr(setType.usingExpr(), ctx);
             }
-            table.alterColumnType(alterCol.column(), dt);
+            table.alterColumnType(alterCol.column(), dt, newPrecision, newScale);
             Column newCol = table.getColumns().get(convIdx);
             for (int ri = 0; ri < table.getRows().size(); ri++) {
                 Object[] row = table.getRows().get(ri);
@@ -517,7 +535,7 @@ class DdlAlterTableExecutor {
                         : null;
             }
         } else {
-            table.alterColumnType(alterCol.column(), dt);
+            table.alterColumnType(alterCol.column(), dt, newPrecision, newScale);
             Column newCol = table.getColumns().get(convIdx);
             for (Object[] row : table.getRows()) {
                 if (row[convIdx] != null) {
