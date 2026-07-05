@@ -147,7 +147,10 @@ class CastEvaluator {
                     // Nested array (2D+): split on top-level commas respecting brace depth
                     list = parseTopLevelArrayElements(inner);
                 } else {
-                    list = java.util.Arrays.asList(inner.split(","));
+                    // Flat array: parse respecting PG array-literal quoting rules (element
+                    // double-quotes and escapes must be stripped, e.g. {"api","direct"} as
+                    // produced by JDBC Connection.createArrayOf wire encoding).
+                    list = executor.parsePostgresArrayLiteral(valStr);
                 }
             } else {
                 list = null;
@@ -158,7 +161,9 @@ class CastEvaluator {
                 for (Object elem : list) {
                     if (elem == null) castList.add(null);
                     else {
-                        String elemStr = elem instanceof String ? ((String) elem).trim() : elem.toString();
+                        // Do not trim: quoted elements may carry significant leading/trailing
+                        // whitespace (already normalized by the parser above for unquoted ones).
+                        String elemStr = elem instanceof String ? (String) elem : elem.toString();
                         // If the element is itself a sub-array literal (e.g., "{1,2}"), cast as elemType[]
                         if (elemStr.startsWith("{") && elemStr.endsWith("}") && elem instanceof String) {
                             castList.add(applyCast(elemStr, elemType + "[]"));
