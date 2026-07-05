@@ -267,6 +267,20 @@ class PgWireValueFormatter {
 
     /** Write a RowDescription message to the ByteBuf. */
     static void sendRowDescription(ByteBuf buf, List<Column> columns) {
+        sendRowDescription(buf, columns, null);
+    }
+
+    /**
+     * Write a RowDescription message to the ByteBuf.
+     *
+     * @param session the session whose {@link Session#resolveOid} can resolve the real,
+     *                per-type OID for custom enum columns (may be {@code null}, in which case
+     *                enum columns fall back to the unresolvable placeholder OID 0 — pgjdbc's
+     *                {@code TypeInfoCache} treats OID 0 as {@code Oid.UNSPECIFIED} and never
+     *                even attempts to look it up in {@code pg_type}, which is what caused the
+     *                {@code Misuse of castNonNull} crash in {@code PgResultSet.initSqlType}).
+     */
+    static void sendRowDescription(ByteBuf buf, List<Column> columns, Session session) {
         buf.writeByte('T');
         int lengthIdx = buf.writerIndex();
         buf.writeInt(0); // placeholder for length
@@ -276,12 +290,25 @@ class PgWireValueFormatter {
             buf.writeInt(col.getTableOid());
             buf.writeShort(col.getAttNum());
             DataType colType = col.getType() != null ? col.getType() : DataType.TEXT;
-            buf.writeInt(colType.getOid());
+            buf.writeInt(columnTypeOid(colType, col, session));
             buf.writeShort(pgTypeSize(colType));
             buf.writeInt(pgTypeMod(col));
             buf.writeShort(0); // format code (0 = text)
         }
         buf.setInt(lengthIdx, buf.writerIndex() - lengthIdx);
+    }
+
+    /**
+     * Resolves the wire OID to advertise for a column. Custom enum columns must advertise the
+     * real, dynamically-allocated OID for their named type (the same OID the session's own
+     * {@code pg_type}/{@code pg_attribute} catalog rows use, via {@code oid("type:" + name)}) —
+     * not {@link DataType#ENUM}'s generic placeholder OID of 0, which pgjdbc cannot resolve.
+     */
+    private static int columnTypeOid(DataType colType, Column col, Session session) {
+        if (colType == DataType.ENUM && session != null && col.getEnumTypeName() != null) {
+            return session.resolveOid("type:" + col.getEnumTypeName());
+        }
+        return colType.getOid();
     }
 
     static void writeCString(ByteBuf buf, String s) {
