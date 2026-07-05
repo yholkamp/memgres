@@ -119,6 +119,90 @@ class FromFunctionAttributeNotationTest {
         }
     }
 
+    // ---- The fallback must NOT fire for non-function FROM items ----
+    // PostgreSQL's attribute notation on table/subquery aliases operates on the composite row
+    // type (date(t) where t is a record), never by casting the single column's value — so
+    // alias.castname on a one-column subquery/VALUES/table alias is a plain 42703 in PG.
+
+    @Test
+    void castNameOnSingleColumnSubqueryAlias_raises42703() {
+        SQLException ex = assertThrows(SQLException.class, () -> {
+            try (Statement s = conn.createStatement()) {
+                s.executeQuery("SELECT t.date FROM (SELECT '2026-01-01 10:00:00'::timestamp AS ts) AS t");
+            }
+        });
+        assertEquals("42703", ex.getSQLState());
+        assertTrue(ex.getMessage().contains("t.date"), "unexpected message: " + ex.getMessage());
+    }
+
+    @Test
+    void castNameOnSingleColumnValuesAlias_raises42703() {
+        SQLException ex = assertThrows(SQLException.class, () -> {
+            try (Statement s = conn.createStatement()) {
+                s.executeQuery("SELECT v.text FROM (VALUES (1)) AS v(x)");
+            }
+        });
+        assertEquals("42703", ex.getSQLState());
+        assertTrue(ex.getMessage().contains("v.text"), "unexpected message: " + ex.getMessage());
+    }
+
+    @Test
+    void enumTypeNameOnSingleColumnSubqueryAlias_raises42703() throws SQLException {
+        try (Statement s = conn.createStatement()) {
+            s.execute("CREATE TYPE attr_notation_mood AS ENUM ('happy', 'sad')");
+        }
+        try {
+            SQLException ex = assertThrows(SQLException.class, () -> {
+                try (Statement s = conn.createStatement()) {
+                    s.executeQuery("SELECT t.attr_notation_mood FROM (SELECT 'happy' AS val) AS t");
+                }
+            });
+            assertEquals("42703", ex.getSQLState());
+        } finally {
+            try (Statement s = conn.createStatement()) {
+                s.execute("DROP TYPE attr_notation_mood");
+            }
+        }
+    }
+
+    @Test
+    void castNameOnSingleColumnRealTableAlias_raises42703() throws SQLException {
+        try (Statement s = conn.createStatement()) {
+            s.execute("CREATE TABLE attr_notation_one_col (ts timestamp)");
+            s.execute("INSERT INTO attr_notation_one_col VALUES ('2026-01-01 10:00:00')");
+        }
+        try {
+            SQLException ex = assertThrows(SQLException.class, () -> {
+                try (Statement s = conn.createStatement()) {
+                    s.executeQuery("SELECT t.date FROM attr_notation_one_col AS t");
+                }
+            });
+            assertEquals("42703", ex.getSQLState());
+        } finally {
+            try (Statement s = conn.createStatement()) {
+                s.execute("DROP TABLE attr_notation_one_col");
+            }
+        }
+    }
+
+    // ---- WITH ORDINALITY without a column-alias list (parser flag is the source of truth) ----
+
+    @Test
+    void withOrdinality_withoutColumnAliases_addsOrdinalityColumn() throws SQLException {
+        try (Statement s = conn.createStatement();
+             ResultSet rs = s.executeQuery("SELECT * FROM generate_series(10, 12) WITH ORDINALITY")) {
+            assertEquals(2, rs.getMetaData().getColumnCount());
+            assertEquals("ordinality", rs.getMetaData().getColumnName(2).toLowerCase());
+            long expectedOrd = 1;
+            int expectedVal = 10;
+            while (rs.next()) {
+                assertEquals(expectedVal++, rs.getInt(1));
+                assertEquals(expectedOrd++, rs.getLong(2));
+            }
+            assertEquals(13, expectedVal);
+        }
+    }
+
     // ---- Unknown attribute must still raise 42703 ----
 
     @Test
