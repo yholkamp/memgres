@@ -38,6 +38,12 @@ class ExprEvaluator {
     public Object evalExpr(Expression expr, RowContext ctx) {
         if (expr instanceof Literal) return evalLiteral(((Literal) expr));
         if (expr instanceof PrecomputedValueExpr) return ((PrecomputedValueExpr) expr).value();
+        // A set-returning function nested inside a larger SELECT-list expression (e.g.
+        // day_start + interval '1h' * generate_series(0,23,2)) is expanded by SelectExecutor:
+        // the SRF call is evaluated once per row to get its element list, then this exact node
+        // is bound to each element in turn while the owning expression is re-evaluated. See
+        // SelectExecutor.findSrfCall / projectRows.
+        if (ctx != null && ctx.hasSrfOverride(expr)) return ctx.getSrfOverride(expr);
         if (expr instanceof ColumnRef) return evalColumnRef(((ColumnRef) expr), ctx);
         if (expr instanceof BinaryExpr) return executor.binaryOpEvaluator.evalBinary(((BinaryExpr) expr), ctx);
         if (expr instanceof UnaryExpr) return evalUnaryValue(((UnaryExpr) expr).op(), evalExpr(((UnaryExpr) expr).operand(), ctx));

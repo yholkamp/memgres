@@ -944,7 +944,12 @@ class SelectExecutor {
                 } else {
                     resultColumns.add(new Column(alias, executor.inferTypeFromContext(expr, baseBindings), true, false, null));
                 }
-                projections.add(ctx -> executor.evalExpr(expr, ctx));
+                FunctionCallExpr srfNode = findSrfCall(expr);
+                if (srfNode != null) {
+                    projections.add(ctx -> evalSrfExpandedTarget(expr, srfNode, ctx));
+                } else {
+                    projections.add(ctx -> executor.evalExpr(expr, ctx));
+                }
             }
         }
     }
@@ -1172,6 +1177,10 @@ class SelectExecutor {
         }
 
         Object[] values = new Object[stmt.targets().size()];
+        // Only used to host SRF override bindings (see RowContext.setSrfOverride) when a target
+        // expression contains a nested set-returning function call; a no-FROM SELECT has no
+        // table bindings to resolve columns against, so an empty context is safe here.
+        RowContext srfHostCtx = new RowContext(Cols.<RowContext.TableBinding>listOf());
         for (int i = 0; i < stmt.targets().size(); i++) {
             SelectStmt.SelectTarget target = stmt.targets().get(i);
             String alias = target.alias();
@@ -1180,12 +1189,15 @@ class SelectExecutor {
             }
 
             DataType resultType = executor.inferExprType(target.expr());
-            Object val = executor.evalExpr(target.expr(), null);
+            FunctionCallExpr srfNode = findSrfCall(target.expr());
+            Object val = srfNode != null
+                    ? evalSrfExpandedTarget(target.expr(), srfNode, srfHostCtx)
+                    : executor.evalExpr(target.expr(), null);
             if (val instanceof byte[] && resultType == DataType.TEXT) {
                 resultType = DataType.BYTEA;
             }
             columns.add(new Column(alias, resultType, true, false, null));
-            if (val instanceof List<?> && isSrfCall(target.expr())) {
+            if (val instanceof List<?> && srfNode != null) {
                 List<?> list = (List<?>) val;
                 if (srfIndex < 0) {
                     srfIndex = i;
@@ -1270,9 +1282,64 @@ class SelectExecutor {
     }
 
     private boolean isSrfCall(Expression expr) {
-        if (expr instanceof FunctionCallExpr && SRF_FUNCTIONS.contains(FunctionEvaluator.stripSchemaPrefix(((FunctionCallExpr) expr).name().toLowerCase()))) return true;
-        if (expr instanceof CastExpr) return isSrfCall(((CastExpr) expr).expr());
-        return false;
+        return findSrfCall(expr) != null;
+    }
+
+    /**
+     * Recursively searches an expression tree for a nested set-returning function call, e.g.
+     * the {@code generate_series(...)} inside {@code day_start + interval '1h' * generate_series(0,23,2)}.
+     * PostgreSQL only allows one SRF per expression, so the first one found is returned.
+     * Returns {@code null} if the expression contains no SRF call at all.
+     */
+    static FunctionCallExpr findSrfCall(Expression expr) {
+        if (expr == null) return null;
+        if (expr instanceof FunctionCallExpr) {
+            FunctionCallExpr fc = (FunctionCallExpr) expr;
+            if (SRF_FUNCTIONS.contains(FunctionEvaluator.stripSchemaPrefix(fc.name().toLowerCase()))) return fc;
+            for (Expression arg : fc.args()) {
+                FunctionCallExpr found = findSrfCall(arg);
+                if (found != null) return found;
+            }
+            return null;
+        }
+        if (expr instanceof CastExpr) return findSrfCall(((CastExpr) expr).expr());
+        if (expr instanceof BinaryExpr) {
+            FunctionCallExpr found = findSrfCall(((BinaryExpr) expr).left());
+            if (found != null) return found;
+            return findSrfCall(((BinaryExpr) expr).right());
+        }
+        if (expr instanceof UnaryExpr) return findSrfCall(((UnaryExpr) expr).operand());
+        return null;
+    }
+
+    /**
+     * Evaluates a SELECT-list target expression that contains (possibly nested) the given SRF
+     * call node, returning a {@code List<Object>} — one evaluated value of the full target
+     * expression per element the SRF produces (PG 10+ ProjectSet semantics: an SRF anywhere in
+     * the SELECT list expands the whole row set, and every other part of that same target
+     * expression is (re)computed once per generated element, not copied verbatim).
+     */
+    private Object evalSrfExpandedTarget(Expression expr, FunctionCallExpr srfNode, RowContext ctx) {
+        Object srfRaw = executor.evalExpr(srfNode, ctx);
+        if (!(srfRaw instanceof List<?>)) {
+            // Defensive fallback: shouldn't happen since srfNode's name is a known SRF.
+            return executor.evalExpr(expr, ctx);
+        }
+        List<?> elements = (List<?>) srfRaw;
+        if (srfNode == expr) {
+            // Bare top-level SRF target: the raw element list already IS the per-row values.
+            return elements;
+        }
+        List<Object> results = new ArrayList<>(elements.size());
+        for (Object element : elements) {
+            ctx.setSrfOverride(srfNode, element);
+            try {
+                results.add(executor.evalExpr(expr, ctx));
+            } finally {
+                ctx.clearSrfOverride(srfNode);
+            }
+        }
+        return results;
     }
 
     // ---- CTE delegation ----

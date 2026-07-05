@@ -64,6 +64,37 @@ public class RowContext {
     private boolean outerJoinNullPadded;
     /** Column names from USING clauses. These exist in multiple bindings but should not raise ambiguity. */
     private Set<String> usingColumns;
+    /**
+     * Identity-keyed substitutions for set-returning function calls nested inside a larger
+     * SELECT-list expression (e.g. {@code day_start + interval '1h' * generate_series(0,23,2)}).
+     * The SRF is evaluated once per row to get its element list; the owning expression is then
+     * re-evaluated once per generated element with the specific {@code FunctionCallExpr} AST
+     * node (by identity, not structural equality — the same query text used twice would be two
+     * distinct node instances) bound to that element instead of being recomputed as a fresh SRF
+     * call. See {@code SelectExecutor.findSrfCall} / {@code ExprEvaluator.evalExpr}.
+     */
+    private java.util.Map<com.memgres.engine.parser.ast.Expression, Object> srfOverrides;
+
+    /** Binds a value to substitute for {@code node} the next time it is evaluated in this context. */
+    public void setSrfOverride(com.memgres.engine.parser.ast.Expression node, Object value) {
+        if (srfOverrides == null) srfOverrides = new java.util.IdentityHashMap<>();
+        srfOverrides.put(node, value);
+    }
+
+    /** Removes any substitution bound for {@code node} (call after re-evaluating the owning expr). */
+    public void clearSrfOverride(com.memgres.engine.parser.ast.Expression node) {
+        if (srfOverrides != null) srfOverrides.remove(node);
+    }
+
+    /** Returns true if a substitution is currently bound for {@code node} (may map to a null value). */
+    public boolean hasSrfOverride(com.memgres.engine.parser.ast.Expression node) {
+        return srfOverrides != null && srfOverrides.containsKey(node);
+    }
+
+    /** Returns the substituted value for {@code node}; only valid when {@link #hasSrfOverride} is true. */
+    public Object getSrfOverride(com.memgres.engine.parser.ast.Expression node) {
+        return srfOverrides == null ? null : srfOverrides.get(node);
+    }
 
     /** Single-table context (used by UPDATE, DELETE, triggers). */
     public RowContext(Table table, String alias, Object[] row) {
