@@ -158,6 +158,10 @@ class FromJoinExecutor {
                         cols = Cols.listOf();
                     }
                     Table virtualTable = new Table(alias, cols);
+                    // Preserve SRF provenance on the unmatched-row placeholder so the
+                    // attribute-notation fallback (ExprEvaluator.tryAttributeNotationFallback)
+                    // still applies, matching resolveFunctionFrom's matched-row bindings.
+                    virtualTable.setFunctionResult(true);
                     Object[] nullRow = new Object[cols.size()];
                     RowContext rightCtx = new RowContext(virtualTable, alias, nullRow);
                     results.add(mergeContexts(leftCtx, rightCtx));
