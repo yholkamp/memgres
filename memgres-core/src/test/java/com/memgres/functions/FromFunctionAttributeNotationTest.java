@@ -203,6 +203,36 @@ class FromFunctionAttributeNotationTest {
         }
     }
 
+    // ---- LEFT JOIN against a FROM-function with zero join matches must still carry SRF
+    // provenance on the unmatched (all-NULL) placeholder row, so the attribute-notation
+    // fallback still applies to gs.date instead of raising 42703.
+    //
+    // The column reference is placed in ORDER BY (over two left-hand rows, so the sort key is
+    // actually evaluated for each row) rather than the SELECT list: a separate, pre-existing
+    // early column-existence check in SelectExecutor validates every bare-ColumnRef SELECT
+    // target against the raw table schema whenever the query has any JOIN, with no awareness of
+    // attribute-notation fallback or Table.isFunctionResult() at all (it throws 42703 identically
+    // for a *matched* join too, e.g. replacing "ON false" with "ON true" above reproduces the
+    // same error) — that is a distinct, out-of-scope gap, not the unmatched-placeholder
+    // provenance bug this test targets. Routing the reference through ORDER BY exercises exactly
+    // the FromJoinExecutor fix (verified RED without it: "column gs.date does not exist") without
+    // tripping the unrelated SelectExecutor gate. ----
+
+    @Test
+    void gsDateAttributeNotation_resolvesOnUnmatchedLeftJoinRow() throws SQLException {
+        try (Statement s = conn.createStatement();
+             ResultSet rs = s.executeQuery(
+                     "SELECT t.n FROM (SELECT 1 AS n UNION ALL SELECT 2 AS n) AS t "
+                             + "LEFT JOIN generate_series('2026-01-01'::timestamptz, '2026-01-01'::timestamptz, '1 day'::interval) AS gs(key) "
+                             + "ON false ORDER BY gs.date, t.n")) {
+            List<Integer> values = new ArrayList<>();
+            while (rs.next()) {
+                values.add(rs.getInt(1));
+            }
+            assertEquals(List.of(1, 2), values);
+        }
+    }
+
     // ---- Unknown attribute must still raise 42703 ----
 
     @Test
