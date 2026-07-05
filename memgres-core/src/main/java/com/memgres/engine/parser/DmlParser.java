@@ -126,37 +126,16 @@ class DmlParser {
 
         if (parser.check(TokenType.LEFT_PAREN)) {
             parser.expect(TokenType.LEFT_PAREN);
-            // Check if the first element is a parenthesized expression like ((lower(email)))
-            if (parser.check(TokenType.LEFT_PAREN)) {
-                // Expression-based conflict targets
-                conflictExpressions = new ArrayList<>();
-                do {
-                    parser.expect(TokenType.LEFT_PAREN);
-                    // Capture the expression text by recording start position and parsing
-                    int exprStart = parser.pos;
-                    parser.parseExpression(); // consume the expression
-                    // Reconstruct expression text from tokens
-                    StringBuilder sb = new StringBuilder();
-                    for (int i = exprStart; i < parser.pos; i++) {
-                        if (i > exprStart) {
-                            // Add space unless previous token is ( or current token is ) or ,
-                            Token prev = parser.tokens.get(i - 1);
-                            Token cur = parser.tokens.get(i);
-                            if (prev.type() != TokenType.LEFT_PAREN && cur.type() != TokenType.RIGHT_PAREN
-                                    && cur.type() != TokenType.COMMA && prev.type() != TokenType.COMMA) {
-                                sb.append(' ');
-                            }
-                        }
-                        sb.append(parser.tokens.get(i).value());
-                    }
-                    conflictExpressions.add(sb.toString());
-                    parser.expect(TokenType.RIGHT_PAREN);
-                } while (parser.match(TokenType.COMMA));
+            // Conflict target list: entries may be bare column names or parenthesized
+            // expressions, e.g. ON CONFLICT (queue_name, ((input->>'price_id'))). A mix of
+            // both is normalized to conflictExpressions (bare names carried as their own
+            // text) so the executor can match structurally against a constraint's
+            // expression-column text regardless of which entries are plain identifiers.
+            List<String> entries = parser.parseColumnOrExpressionList();
+            if (parser.lastColumnListHadExpression) {
+                conflictExpressions = entries;
             } else {
-                conflictColumns = new ArrayList<>();
-                do {
-                    conflictColumns.add(parser.readIdentifier());
-                } while (parser.match(TokenType.COMMA));
+                conflictColumns = entries;
             }
             parser.expect(TokenType.RIGHT_PAREN);
             // Optional WHERE clause on conflict target (partial index predicate)
