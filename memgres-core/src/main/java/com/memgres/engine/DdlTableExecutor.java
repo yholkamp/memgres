@@ -379,6 +379,18 @@ class DdlTableExecutor {
         partition.setPartitionParent(parent);
         parent.addPartition(partition);
 
+        // Partitions must enforce the parent's PK/UNIQUE constraints themselves: actual row
+        // storage lives on the leaf partition, not the parent, so without a copy here the
+        // partition has no TableIndex and neither per-partition duplicate-key checks nor
+        // ON CONFLICT conflict detection can find rows that already live in that partition
+        // (PostgreSQL requires unique constraints on a partitioned table to include the
+        // partition key, so enforcing them independently per-partition is correct).
+        for (StoredConstraint sc : parent.getConstraints()) {
+            if (sc.getType() == StoredConstraint.Type.PRIMARY_KEY || sc.getType() == StoredConstraint.Type.UNIQUE) {
+                partition.addConstraint(sc);
+            }
+        }
+
         if (stmt.partitionBounds() != null && !stmt.partitionBounds().isEmpty()) {
             applyPartitionBounds(partition, parent, stmt.partitionBounds(), stmt.name());
         }
