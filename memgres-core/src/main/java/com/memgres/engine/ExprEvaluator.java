@@ -544,16 +544,22 @@ class ExprEvaluator {
      * column is named {@code key}, so {@code gs.date} isn't a column, but {@code date(gs)} (cast
      * the row's single timestamp value to a date) is valid and is exactly what PostgreSQL returns.
      * <p>
-     * Scoped to FROM-item aliases bound to a single-column virtual table (as produced by FROM
-     * set-returning functions like {@code generate_series}/{@code unnest}), matching the concrete
-     * defect this resolves. Returns {@link #ATTRIBUTE_NOTATION_NOT_APPLICABLE} when the qualifier
-     * isn't bound in {@code ctx}, doesn't have exactly one column, or {@code name} isn't a
+     * Scoped to aliases bound to a single-column FROM-function (SRF) result table, as marked by
+     * {@link FromFunctionResolver} via {@code Table.setFunctionResult(true)} — e.g.
+     * {@code generate_series}/{@code unnest} virtual tables. It must NOT fire for ordinary
+     * table/subquery/VALUES/CTE aliases: PostgreSQL's attribute notation there operates on the
+     * composite row type ({@code date(t)} with {@code t} a record), never by casting the single
+     * column's value, so {@code t.date} on a one-column table alias is a plain 42703 in PG and a
+     * value-cast here would silently coerce typos into wrong results. Returns
+     * {@link #ATTRIBUTE_NOTATION_NOT_APPLICABLE} when the qualifier isn't bound in {@code ctx},
+     * isn't a function-result binding, doesn't have exactly one column, or {@code name} isn't a
      * recognized cast type name or registered function — callers should then raise the original
      * "column X.Y does not exist" error.
      */
     private Object tryAttributeNotationFallback(RowContext ctx, String tableQualifier, String funcOrCastName) {
         RowContext.TableBinding binding = ctx.getBinding(tableQualifier);
         if (binding == null) return ATTRIBUTE_NOTATION_NOT_APPLICABLE;
+        if (!binding.table().isFunctionResult()) return ATTRIBUTE_NOTATION_NOT_APPLICABLE;
         List<Column> cols = binding.table().getColumns();
         if (cols.size() != 1) return ATTRIBUTE_NOTATION_NOT_APPLICABLE;
         Object rowValue = binding.row()[0];
