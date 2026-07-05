@@ -1440,7 +1440,13 @@ class ExprEvaluator {
             Object operand = evalExpr(c.operand(), ctx);
             for (CaseExpr.WhenClause when : c.whenClauses()) {
                 Object whenVal = evalExpr(when.condition(), ctx);
-                if (operand != null && whenVal != null && Objects.equals(operand, whenVal)) {
+                // Simple CASE is defined as "operand = whenVal" (PG docs), so use the same
+                // equality semantics as the = operator (TypeCoercion.areEqual) rather than raw
+                // Java equality. Raw Objects.equals silently failed for cross-representation
+                // matches — most notably CASE <enum_col> WHEN 'label' (PgEnum vs String), which
+                // made every WHEN miss and fall through to ELSE, e.g. turning the app's
+                // "ORDER BY CASE type WHEN 'direct' THEN 0 ..." ranking into a constant.
+                if (operand != null && whenVal != null && TypeCoercion.areEqual(operand, whenVal)) {
                     return evalExpr(when.result(), ctx);
                 }
             }
