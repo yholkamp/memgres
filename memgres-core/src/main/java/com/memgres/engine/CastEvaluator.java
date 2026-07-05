@@ -149,8 +149,11 @@ class CastEvaluator {
                 } else {
                     // Flat array: parse respecting PG array-literal quoting rules (element
                     // double-quotes and escapes must be stripped, e.g. {"api","direct"} as
-                    // produced by JDBC Connection.createArrayOf wire encoding).
-                    list = executor.parsePostgresArrayLiteral(valStr);
+                    // produced by JDBC Connection.createArrayOf wire encoding). Raw mode:
+                    // keep each element's original text (no numeric typing) so the
+                    // per-element target-type cast below sees the exact spelling
+                    // ({01,02}::text[] must stay "01","02", not 1,2).
+                    list = executor.parsePostgresArrayLiteralRaw(valStr);
                 }
             } else {
                 list = null;

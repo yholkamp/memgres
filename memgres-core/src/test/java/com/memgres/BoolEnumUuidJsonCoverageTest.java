@@ -602,6 +602,50 @@ class BoolEnumUuidJsonCoverageTest {
         }
     }
 
+    @Test
+    void text_array_literal_unquoted_numeric_elements_keep_raw_text() throws SQLException {
+        // PG keeps the raw element text when casting to text[]: no numeric
+        // normalization ({01,02} must not become {1,2}).
+        try (Statement s = conn.createStatement()) {
+            ResultSet rs = s.executeQuery("SELECT ('{01,02}'::text[])[1], ('{01,02}'::text[])[2]");
+            assertTrue(rs.next());
+            assertEquals("01", rs.getString(1));
+            assertEquals("02", rs.getString(2));
+        }
+    }
+
+    @Test
+    void text_array_literal_signed_numeric_elements_keep_raw_text() throws SQLException {
+        try (Statement s = conn.createStatement()) {
+            ResultSet rs = s.executeQuery("SELECT ('{+5,-5}'::text[])[1], ('{+5,-5}'::text[])[2]");
+            assertTrue(rs.next());
+            assertEquals("+5", rs.getString(1));
+            assertEquals("-5", rs.getString(2));
+        }
+    }
+
+    @Test
+    void int_array_literal_unquoted_elements_with_leading_zeros_cast() throws SQLException {
+        // The target-type cast still converts the raw text to integers.
+        try (Statement s = conn.createStatement()) {
+            ResultSet rs = s.executeQuery("SELECT ('{01,02}'::int[])[1], ('{01,02}'::int[])[2]");
+            assertTrue(rs.next());
+            assertEquals(1, rs.getInt(1));
+            assertEquals(2, rs.getInt(2));
+        }
+    }
+
+    @Test
+    void text_array_literal_null_stays_sql_null_in_cast_path() throws SQLException {
+        try (Statement s = conn.createStatement()) {
+            ResultSet rs = s.executeQuery("SELECT ('{NULL,a}'::text[])[1], ('{NULL,a}'::text[])[2]");
+            assertTrue(rs.next());
+            assertNull(rs.getString(1));
+            assertTrue(rs.wasNull());
+            assertEquals("a", rs.getString(2));
+        }
+    }
+
     // ========================================================================
     // 36. UUID Type
     // ========================================================================
