@@ -422,11 +422,22 @@ public class Table {
     }
 
     public void alterColumnType(String columnName, DataType newType) {
+        alterColumnType(columnName, newType, null, null);
+    }
+
+    /**
+     * Changes a column's type, replacing the full type spec including its typmod: the new
+     * precision/scale come from the new type declaration (null when it has none), never carried
+     * over from the old column. Mirrors PostgreSQL, where {@code ALTER COLUMN x TYPE numeric(10,2)}
+     * sets scale 2 and {@code ALTER COLUMN x TYPE numeric} (no typmod) removes any previous
+     * precision/scale constraint.
+     */
+    public void alterColumnType(String columnName, DataType newType, Integer precision, Integer scale) {
         int idx = getColumnIndex(columnName);
         if (idx < 0) throw new MemgresException("Column not found: " + columnName);
         Column old = columns.get(idx);
         columns.set(idx, new Column(old.getName(), newType, old.isNullable(), old.isPrimaryKey(),
-                old.getDefaultValue(), old.getEnumTypeName(), old.getPrecision(), old.getScale(), old.getGeneratedExpr()));
+                old.getDefaultValue(), old.getEnumTypeName(), precision, scale, old.getGeneratedExpr()));
     }
 
     public void alterColumnDefault(String columnName, String defaultValue) {
