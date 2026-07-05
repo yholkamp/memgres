@@ -98,13 +98,19 @@ class FromFunctionResolver {
             PgInterval ivStep = stepObj != null ? TypeCoercion.toInterval(stepObj) : new PgInterval(0, 1, 0);
             boolean ascending = !tzStart.isAfter(tzStop);
             String colName = firstColAlias(colAliases, alias);
-            Column col = new Column(colName, DataType.TIMESTAMPTZ, true, false, null);
-            Table virtualTable = new Table(alias, Cols.listOf(col));
+            List<Column> cols = new ArrayList<>();
+            cols.add(new Column(colName, DataType.TIMESTAMPTZ, true, false, null));
+            boolean hasOrdinality = colAliases != null && colAliases.size() >= 2;
+            if (hasOrdinality) {
+                cols.add(new Column(colAliases.get(1), DataType.BIGINT, true, false, null));
+            }
+            Table virtualTable = new Table(alias, cols);
             List<RowContext> contexts = new ArrayList<>();
             java.time.OffsetDateTime cur = tzStart;
+            long ord = 1;
             for (int guard = 0; guard < 10000; guard++) {
                 if (ascending ? cur.isAfter(tzStop) : cur.isBefore(tzStop)) break;
-                Object[] row = new Object[]{cur};
+                Object[] row = hasOrdinality ? new Object[]{cur, ord++} : new Object[]{cur};
                 virtualTable.insertRow(row);
                 contexts.add(new RowContext(virtualTable, alias, row));
                 java.time.OffsetDateTime next = ivStep.addTo(cur);
@@ -123,14 +129,20 @@ class FromFunctionResolver {
             boolean ascending = !dtStart.isAfter(dtStop);
             String colName = firstColAlias(colAliases, alias);
             // DATE input → timestamptz (PG promotes), TIMESTAMP input → timestamp
-            Column col = new Column(colName, dateInput ? DataType.TIMESTAMPTZ : DataType.TIMESTAMP, true, false, null);
-            Table virtualTable = new Table(alias, Cols.listOf(col));
+            List<Column> cols = new ArrayList<>();
+            cols.add(new Column(colName, dateInput ? DataType.TIMESTAMPTZ : DataType.TIMESTAMP, true, false, null));
+            boolean hasOrdinality = colAliases != null && colAliases.size() >= 2;
+            if (hasOrdinality) {
+                cols.add(new Column(colAliases.get(1), DataType.BIGINT, true, false, null));
+            }
+            Table virtualTable = new Table(alias, cols);
             List<RowContext> contexts = new ArrayList<>();
             java.time.LocalDateTime cur = dtStart;
+            long ord = 1;
             for (int guard = 0; guard < 10000; guard++) {
                 if (ascending ? cur.isAfter(dtStop) : cur.isBefore(dtStop)) break;
                 Object val = dateInput ? cur.atZone(java.time.ZoneOffset.UTC).toOffsetDateTime() : cur;
-                Object[] row = new Object[]{val};
+                Object[] row = hasOrdinality ? new Object[]{val, ord++} : new Object[]{val};
                 virtualTable.insertRow(row);
                 contexts.add(new RowContext(virtualTable, alias, row));
                 java.time.LocalDateTime next = ivStep.addTo(cur);
