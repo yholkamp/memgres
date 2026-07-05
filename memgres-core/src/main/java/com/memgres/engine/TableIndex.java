@@ -3,6 +3,7 @@ package com.memgres.engine;
 import com.memgres.engine.util.Cols;
 
 import java.math.BigDecimal;
+import java.time.OffsetDateTime;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -173,6 +174,14 @@ public class TableIndex {
      */
     static Object normalize(Object val) {
         if (val == null) return null;
+        // TIMESTAMPTZ values carry no stored offset in PostgreSQL: two OffsetDateTime instances
+        // representing the same instant but constructed with different offsets (e.g. one parsed
+        // from a UTC-suffixed literal, another decoded from a client-bound parameter using the
+        // JVM's default zone) are NOT equal per OffsetDateTime.equals()/hashCode(), even though
+        // PostgreSQL would treat them as the same key. Normalize to Instant so index lookups
+        // (PK/UNIQUE duplicate checks, ON CONFLICT conflict detection) compare by instant like
+        // real timestamptz semantics, instead of missing genuine duplicates/conflicts.
+        if (val instanceof OffsetDateTime) return ((OffsetDateTime) val).toInstant();
         if (val instanceof Number) {
             Number n = (Number) val;
             // Normalize all numeric types to BigDecimal for consistent hashing

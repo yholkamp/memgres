@@ -405,7 +405,13 @@ class DmlExecutor {
                         throw new MemgresException("there is no unique or exclusion constraint matching the ON CONFLICT specification", "42P10");
                     }
                 }
-                Object[] conflictRow = conflictHelper.findConflictingRow(table, row, stmt.onConflict());
+                // For partitioned tables, actual row storage lives on the leaf partition, not
+                // the parent: route the conflict search there so it can see (and update) rows
+                // that were previously routed to that same partition. The constraint-target
+                // validation above intentionally stays against the parent's declared
+                // constraints; the partition carries its own copy (see createPartitionOfTable).
+                Table conflictTable = partitionHelper.routeToPartition(table, row);
+                Object[] conflictRow = conflictHelper.findConflictingRow(conflictTable, row, stmt.onConflict());
                 if (conflictRow != null) {
                     if (stmt.onConflict().doNothing()) {
                         // DO NOTHING: skip this row
@@ -414,13 +420,13 @@ class DmlExecutor {
                         // DO UPDATE: update the conflicting row
                         // Build RowContext with "excluded" binding so the standard expression
                         // evaluator resolves EXCLUDED.col references for all expression types
-                        Object[] evalConflict = hasVirtualColumns(table) ? computeVirtualColumns(table, conflictRow) : conflictRow;
+                        Object[] evalConflict = hasVirtualColumns(conflictTable) ? computeVirtualColumns(conflictTable, conflictRow) : conflictRow;
                         List<RowContext.TableBinding> conflictBindings = new ArrayList<>();
-                        conflictBindings.add(new RowContext.TableBinding(table, stmt.alias(), evalConflict));
-                        conflictBindings.add(new RowContext.TableBinding(table, "excluded", row));
+                        conflictBindings.add(new RowContext.TableBinding(conflictTable, stmt.alias(), evalConflict));
+                        conflictBindings.add(new RowContext.TableBinding(conflictTable, "excluded", row));
                         RowContext conflictCtx = new RowContext(conflictBindings);
                         Set<String> allCols = new HashSet<>();
-                        for (Column c : table.getColumns()) allCols.add(c.getName().toLowerCase());
+                        for (Column c : conflictTable.getColumns()) allCols.add(c.getName().toLowerCase());
                         conflictCtx.setUsingColumns(allCols);
 
                         // First evaluate the DO UPDATE WHERE clause if present
@@ -429,7 +435,7 @@ class DmlExecutor {
                             if (!(whereResult instanceof Boolean && ((Boolean) whereResult))) {
                                 // WHERE clause evaluated to false/null: skip the update, keep existing row
                                 if (stmt.returning() != null && !stmt.returning().isEmpty()) {
-                                    returningRows.add(evalReturning(stmt.returning(), table, stmt.alias(), conflictRow, conflictRow, conflictRow));
+                                    returningRows.add(evalReturning(stmt.returning(), conflictTable, stmt.alias(), conflictRow, conflictRow, conflictRow));
                                 }
                                 inserted++;
                                 continue;
@@ -439,24 +445,24 @@ class DmlExecutor {
                         Object[] newRow = Arrays.copyOf(conflictRow, conflictRow.length);
                         try {
                             for (InsertStmt.SetClause set : stmt.onConflict().doUpdate()) {
-                                int colIdx = table.getColumnIndex(set.column());
+                                int colIdx = conflictTable.getColumnIndex(set.column());
                                 if (colIdx < 0) {
                                     throw new MemgresException("Column not found: " + set.column());
                                 }
                                 Object val = executor.evalExpr(set.value(), conflictCtx);
-                                newRow[colIdx] = TypeCoercion.coerceForStorage(val, table.getColumns().get(colIdx));
+                                newRow[colIdx] = TypeCoercion.coerceForStorage(val, conflictTable.getColumns().get(colIdx));
                             }
-                            computeGeneratedColumns(table, newRow);
-                            table.updateRowInPlace(conflictRow, oldRow, newRow);
+                            computeGeneratedColumns(conflictTable, newRow);
+                            conflictTable.updateRowInPlace(conflictRow, oldRow, newRow);
                         } catch (Exception e) {
                             // Restore old values and re-add to index on failure
-                            table.updateRowInPlace(conflictRow, conflictRow, oldRow);
+                            conflictTable.updateRowInPlace(conflictRow, conflictRow, oldRow);
                             throw e;
                         }
-                        executor.constraintValidator.validateConstraints(table, conflictRow, conflictRow);
-                        recordUpdateUndo(stmt.schema(), stmt.table(), conflictRow, oldRow);
+                        executor.constraintValidator.validateConstraints(conflictTable, conflictRow, conflictRow);
+                        recordUpdateUndo(stmt.schema(), conflictTable.getName(), conflictRow, oldRow);
                         if (stmt.returning() != null && !stmt.returning().isEmpty()) {
-                            returningRows.add(evalReturning(stmt.returning(), table, stmt.alias(), conflictRow, oldRow, conflictRow));
+                            returningRows.add(evalReturning(stmt.returning(), conflictTable, stmt.alias(), conflictRow, oldRow, conflictRow));
                         }
                         inserted++;
                         continue;
