@@ -311,36 +311,8 @@ class DdlTableExecutor {
         }
 
         // Validate that PK/UNIQUE constraints on partitioned tables include the partition column
-        if (table.getPartitionStrategy() != null && table.getPartitionColumn() != null) {
-            String rawPartCol = table.getPartitionColumn().toLowerCase().trim();
-            // Strip surrounding parens from expression-based partition keys
-            if (rawPartCol.startsWith("(")) rawPartCol = rawPartCol.substring(1);
-            if (rawPartCol.endsWith(")")) rawPartCol = rawPartCol.substring(0, rawPartCol.length() - 1);
-            rawPartCol = rawPartCol.trim();
-            // Only validate simple column-name partition keys (skip expressions)
-            if (!rawPartCol.contains("(")) {
-                for (String partKeyCol : rawPartCol.split(",")) {
-                    String partKey = partKeyCol.trim();
-                    for (StoredConstraint sc : table.getConstraints()) {
-                        if (sc.getType() == StoredConstraint.Type.PRIMARY_KEY
-                                || sc.getType() == StoredConstraint.Type.UNIQUE) {
-                            boolean found = false;
-                            for (String col : sc.getColumns()) {
-                                if (col.equalsIgnoreCase(partKey)) { found = true; break; }
-                            }
-                            if (!found) {
-                                String constraintKind = sc.getType() == StoredConstraint.Type.PRIMARY_KEY
-                                        ? "PRIMARY KEY" : "UNIQUE";
-                                throw new MemgresException(
-                                        "unique constraint on partitioned table must include all partitioning columns\n"
-                                        + "  Detail: " + constraintKind + " constraint missing column \""
-                                        + partKey + "\" which is part of the partition key.",
-                                        "0A000");
-                            }
-                        }
-                    }
-                }
-            }
+        for (StoredConstraint sc : table.getConstraints()) {
+            validatePartitionKeyCoverage(table, sc);
         }
         } catch (MemgresException e) {
             // Roll back: remove the table from schema so it doesn't persist after a failed CREATE TABLE.
@@ -385,9 +357,12 @@ class DdlTableExecutor {
         // ON CONFLICT conflict detection can find rows that already live in that partition
         // (PostgreSQL requires unique constraints on a partitioned table to include the
         // partition key, so enforcing them independently per-partition is correct).
+        // Each partition gets its own independent StoredConstraint copy (not the parent's
+        // instance) so that later mutations - e.g. ALTER TABLE ... VALIDATE CONSTRAINT - applied
+        // through one table can't silently leak into siblings sharing the same object.
         for (StoredConstraint sc : parent.getConstraints()) {
             if (sc.getType() == StoredConstraint.Type.PRIMARY_KEY || sc.getType() == StoredConstraint.Type.UNIQUE) {
-                partition.addConstraint(sc);
+                partition.addConstraint(sc.copyForPartition(stmt.name()));
             }
         }
 
@@ -403,6 +378,43 @@ class DdlTableExecutor {
         schema.addTable(partition);
         executor.recordUndo(new Session.CreateTableUndo(schemaName, stmt.name()));
         return QueryResult.command(QueryResult.Type.CREATE_TABLE, 0);
+    }
+
+    /**
+     * Validates that a PK/UNIQUE constraint on a partitioned table includes every column of the
+     * table's partition key (PostgreSQL requires this so that unique enforcement can be done
+     * per-partition). No-op for non-partitioned tables, other constraint types, and
+     * expression-based partition keys (which this simple check doesn't attempt to parse).
+     * Shared between CREATE TABLE (table-level and column-level constraints) and
+     * ALTER TABLE ... ADD CONSTRAINT so both entry points reject the same invalid definitions.
+     */
+    static void validatePartitionKeyCoverage(Table table, StoredConstraint sc) {
+        if (table.getPartitionStrategy() == null || table.getPartitionColumn() == null) return;
+        if (sc.getType() != StoredConstraint.Type.PRIMARY_KEY && sc.getType() != StoredConstraint.Type.UNIQUE) return;
+
+        String rawPartCol = table.getPartitionColumn().toLowerCase().trim();
+        // Strip surrounding parens from expression-based partition keys
+        if (rawPartCol.startsWith("(")) rawPartCol = rawPartCol.substring(1);
+        if (rawPartCol.endsWith(")")) rawPartCol = rawPartCol.substring(0, rawPartCol.length() - 1);
+        rawPartCol = rawPartCol.trim();
+        // Only validate simple column-name partition keys (skip expressions)
+        if (rawPartCol.contains("(")) return;
+
+        for (String partKeyCol : rawPartCol.split(",")) {
+            String partKey = partKeyCol.trim();
+            boolean found = false;
+            for (String col : sc.getColumns()) {
+                if (col.equalsIgnoreCase(partKey)) { found = true; break; }
+            }
+            if (!found) {
+                String constraintKind = sc.getType() == StoredConstraint.Type.PRIMARY_KEY ? "PRIMARY KEY" : "UNIQUE";
+                throw new MemgresException(
+                        "unique constraint on partitioned table must include all partitioning columns\n"
+                        + "  Detail: " + constraintKind + " constraint missing column \""
+                        + partKey + "\" which is part of the partition key.",
+                        "0A000");
+            }
+        }
     }
 
     /**
