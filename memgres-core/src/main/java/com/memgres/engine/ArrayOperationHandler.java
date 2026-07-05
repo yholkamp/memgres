@@ -113,6 +113,19 @@ class ArrayOperationHandler {
     }
 
     List<Object> parsePostgresArrayLiteral(String s) {
+        return parsePostgresArrayLiteral(s, false);
+    }
+
+    /**
+     * Parse a PG array literal like {a,"b,c",NULL}.
+     *
+     * @param rawStrings when true, unquoted elements keep their raw text (no eager
+     *        Integer/Long/BigDecimal conversion) so a downstream cast to the target
+     *        element type sees the original spelling (e.g. "01", "+5"). Unquoted
+     *        NULL still becomes SQL null. When false, numeric-looking unquoted
+     *        elements are typed, which the = ANY()/IN equality paths rely on.
+     */
+    List<Object> parsePostgresArrayLiteral(String s, boolean rawStrings) {
         String inner = s.substring(1, s.length() - 1).trim();
         if (inner.isEmpty()) return Cols.listOf();
 
@@ -145,6 +158,8 @@ class ArrayOperationHandler {
                 String elem = inner.substring(start, i).trim();
                 if (elem.equalsIgnoreCase("NULL")) {
                     result.add(null);
+                } else if (rawStrings) {
+                    result.add(elem);
                 } else {
                     try {
                         if (elem.contains(".") || elem.contains("e") || elem.contains("E")) {
