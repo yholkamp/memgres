@@ -28,6 +28,33 @@ class PgWireDescribeHelper {
         this.database = database;
     }
 
+    /**
+     * Thrown by describeStatement/describePortal instead of falling back to NoData when a
+     * statement is confirmed row-returning (isQueryStatement / isSafeToDescribe) but the
+     * describe-time inference execution genuinely failed. PostgreSQL surfaces errors at
+     * Describe time too, so the caller (PgWireHandler) should convert this into a real
+     * ErrorResponse rather than silently telling the client "no result set" — the previous
+     * behavior left the client believing a row-returning statement returns nothing, which
+     * surfaces downstream as a confusing client-side "no results"/"missing field structure"
+     * failure instead of the actual server-side error.
+     */
+    static final class DescribeExecutionFailedException extends RuntimeException {
+        final String sqlState;
+
+        DescribeExecutionFailedException(String sqlState, String message) {
+            super(message);
+            this.sqlState = sqlState;
+        }
+    }
+
+    private static String sqlStateOf(Exception e) {
+        if (e instanceof MemgresException) {
+            String state = ((MemgresException) e).getSqlState();
+            if (state != null) return state;
+        }
+        return "XX000";
+    }
+
     // ---- Describe Statement ----
 
     /**
@@ -94,6 +121,7 @@ class PgWireDescribeHelper {
         }
 
         // SELECT (safe to describe): use LIMIT 0 to get column metadata
+        Exception describeFailure = null;
         if (isSafeToDescribe(sql)) {
             Session.TransactionStatus savedStatus = session.getStatus();
             try {
@@ -112,6 +140,7 @@ class PgWireDescribeHelper {
                 LOG.warn("[PROTO] Describe Stmt LIMIT 0 failed: {} | {}", e.getMessage(),
                         sql.substring(0, Math.min(70, sql.length())).replace("\n"," "));
                 session.restoreStatus(savedStatus);
+                describeFailure = e;
             }
         }
 
@@ -125,6 +154,13 @@ class PgWireDescribeHelper {
         }
 
         if (isQueryStatement(sql)) {
+            // A row-returning statement must never be told "NoData" — that leaves the
+            // client believing it returns zero columns/no result set at all, which then
+            // surfaces downstream as a confusing client-side failure (e.g. jdbi's
+            // NoResultsException) instead of the real server-side error. Surface it now.
+            if (describeFailure != null) {
+                throw new DescribeExecutionFailedException(sqlStateOf(describeFailure), describeFailure.getMessage());
+            }
             LOG.warn("[PROTO] Describe Stmt fell through to NoData for query: {}",
                     sql.substring(0, Math.min(120, sql.length())).replace("\n"," "));
         }
@@ -217,6 +253,16 @@ class PgWireDescribeHelper {
             return new DescribePortalResult(false, null);
         }
 
+        // Note on policy: unlike describeStatement (which probes with $N params replaced by
+        // NULL, so a probe failure can be spurious/unrepresentative of the real bound values —
+        // that mismatch is exactly Bug 3's NPE-swallowed-to-NoData scenario), describePortal
+        // probes by executing the SQL with the *real* bound parameter values already known from
+        // Bind. So if this probe fails, the subsequent real Execute (same SQL, same real values)
+        // will fail identically and surface the actual ErrorResponse there — falling back to
+        // NoData here is safe (no row-vs-no-row mismatch can occur) and, empirically, throwing
+        // here instead caused a regression: it discards the pipelined Execute message, which
+        // otherwise doubles as the autocommit-safe recovery for the transient FAILED status this
+        // probe leaves behind (see Session.execute()'s IN_TRANSACTION -> FAILED transition).
         if (isSafeToDescribe(sql)) {
             Session.TransactionStatus savedStatusPortal = session.getStatus();
             try {
@@ -343,36 +389,146 @@ class PgWireDescribeHelper {
         return false;
     }
 
+    /**
+     * Scans a (already-uppercased) "WITH ..." statement to decide whether its main
+     * statement is a SELECT (row-returning) or a DML statement (INSERT/UPDATE/DELETE).
+     * Must skip over string/dollar-quoted literals and comments: a paren or DML keyword
+     * appearing inside a literal (e.g. {@code WITH x AS (SELECT ') DELETE' AS s) SELECT ...})
+     * must never desync the paren-depth tracking or be mistaken for a real keyword.
+     */
     boolean isWithSelect(String upper) {
         int i = 4;
         int len = upper.length();
         while (i < len) {
             char c = upper.charAt(i);
             if (c == '(') {
-                int depth = 1;
-                i++;
-                while (i < len && depth > 0) {
-                    if (upper.charAt(i) == '(') depth++;
-                    else if (upper.charAt(i) == ')') depth--;
-                    i++;
-                }
-            } else if (c == 'S' && i + 6 <= len && upper.substring(i, i + 6).equals("SELECT")
-                    && (i + 6 >= len || !Character.isLetterOrDigit(upper.charAt(i + 6)))) {
+                i = skipBalancedParens(upper, i);
+                continue;
+            }
+            int afterLiteral = skipLiteralOrComment(upper, i);
+            if (afterLiteral > i) {
+                i = afterLiteral;
+                continue;
+            }
+            if (c == 'S' && matchesKeyword(upper, i, "SELECT")) {
                 return true;
-            } else if (c == 'I' && i + 6 <= len && upper.substring(i, i + 6).equals("INSERT")
-                    && (i + 6 >= len || !Character.isLetterOrDigit(upper.charAt(i + 6)))) {
+            } else if (c == 'I' && matchesKeyword(upper, i, "INSERT")) {
                 return false;
-            } else if (c == 'U' && i + 6 <= len && upper.substring(i, i + 6).equals("UPDATE")
-                    && (i + 6 >= len || !Character.isLetterOrDigit(upper.charAt(i + 6)))) {
+            } else if (c == 'U' && matchesKeyword(upper, i, "UPDATE")) {
                 return false;
-            } else if (c == 'D' && i + 6 <= len && upper.substring(i, i + 6).equals("DELETE")
-                    && (i + 6 >= len || !Character.isLetterOrDigit(upper.charAt(i + 6)))) {
+            } else if (c == 'D' && matchesKeyword(upper, i, "DELETE")) {
                 return false;
             } else {
                 i++;
             }
         }
         return true;
+    }
+
+    /**
+     * Skips a balanced {@code (...)} group starting at {@code upper.charAt(i) == '('},
+     * honoring string/dollar-quoted literals and comments nested inside so their content
+     * (parens, keywords) never affects the paren-depth count. Returns the index just past
+     * the matching {@code ')'} (or {@code len} if unterminated).
+     */
+    private static int skipBalancedParens(String upper, int i) {
+        int len = upper.length();
+        int depth = 1;
+        i++;
+        while (i < len && depth > 0) {
+            char c = upper.charAt(i);
+            if (c == '(') {
+                depth++;
+                i++;
+                continue;
+            }
+            if (c == ')') {
+                depth--;
+                i++;
+                continue;
+            }
+            int afterLiteral = skipLiteralOrComment(upper, i);
+            if (afterLiteral > i) {
+                i = afterLiteral;
+                continue;
+            }
+            i++;
+        }
+        return i;
+    }
+
+    /**
+     * If position {@code i} begins a single-quoted string, a double-quoted identifier, a
+     * dollar-quoted string ({@code $$...$$} or {@code $tag$...$tag$}), a line comment
+     * ({@code --}), or a block comment ({@code /* ... * /}), returns the index just past its
+     * end. Otherwise returns {@code i} unchanged (nothing to skip at this position).
+     */
+    private static int skipLiteralOrComment(String upper, int i) {
+        int len = upper.length();
+        char c = upper.charAt(i);
+        if (c == '\'' || c == '"') {
+            int j = i + 1;
+            while (j < len) {
+                if (upper.charAt(j) == c) {
+                    if (j + 1 < len && upper.charAt(j + 1) == c) {
+                        j += 2;
+                        continue;
+                    }
+                    return j + 1;
+                }
+                j++;
+            }
+            return len; // unterminated literal: consume to end rather than desync further
+        }
+        if (c == '-' && i + 1 < len && upper.charAt(i + 1) == '-') {
+            int j = i + 2;
+            while (j < len && upper.charAt(j) != '\n') j++;
+            return j;
+        }
+        if (c == '/' && i + 1 < len && upper.charAt(i + 1) == '*') {
+            int j = i + 2;
+            int depth = 1;
+            while (j + 1 < len && depth > 0) {
+                if (upper.charAt(j) == '/' && upper.charAt(j + 1) == '*') {
+                    depth++;
+                    j += 2;
+                } else if (upper.charAt(j) == '*' && upper.charAt(j + 1) == '/') {
+                    depth--;
+                    j += 2;
+                } else {
+                    j++;
+                }
+            }
+            return j;
+        }
+        if (c == '$') {
+            int tagEnd = matchDollarQuoteTagEnd(upper, i);
+            if (tagEnd >= 0) {
+                String tag = upper.substring(i, tagEnd);
+                int closeIdx = upper.indexOf(tag, tagEnd);
+                return closeIdx >= 0 ? closeIdx + tag.length() : len;
+            }
+        }
+        return i;
+    }
+
+    /**
+     * If position {@code i} begins a dollar-quote opening tag ({@code $$} or {@code $tag$}),
+     * returns the index just past the closing {@code $} of the tag; otherwise returns -1.
+     */
+    private static int matchDollarQuoteTagEnd(String upper, int i) {
+        int len = upper.length();
+        int j = i + 1;
+        while (j < len && (Character.isLetterOrDigit(upper.charAt(j)) || upper.charAt(j) == '_')) j++;
+        if (j < len && upper.charAt(j) == '$') return j + 1;
+        return -1;
+    }
+
+    private static boolean matchesKeyword(String upper, int i, String keyword) {
+        int len = upper.length();
+        int kwLen = keyword.length();
+        return i + kwLen <= len && upper.regionMatches(i, keyword, 0, kwLen)
+                && (i + kwLen >= len || !Character.isLetterOrDigit(upper.charAt(i + kwLen)));
     }
 
     // ---- CALL OUT param inference ----

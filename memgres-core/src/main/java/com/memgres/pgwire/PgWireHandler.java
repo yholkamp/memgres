@@ -702,8 +702,12 @@ public class PgWireHandler extends SimpleChannelInboundHandler<PgWireMessage> {
                 sendExtendedError(ctx, "26000", "prepared statement \"" + name + "\" does not exist");
                 return;
             }
-            boolean sent = describeHelper.describeStatement(ctx, name, prepared.sql(), prepared.paramOids());
-            if (sent) markStatementDescribed(name);
+            try {
+                boolean sent = describeHelper.describeStatement(ctx, name, prepared.sql(), prepared.paramOids());
+                if (sent) markStatementDescribed(name);
+            } catch (PgWireDescribeHelper.DescribeExecutionFailedException dfe) {
+                sendExtendedError(ctx, dfe.sqlState, dfe.getMessage());
+            }
         } else {
             Portal portal = portals.get(name);
             if (portal != null) portal.describeAttempted = true;
