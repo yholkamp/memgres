@@ -8,6 +8,10 @@
 -- ResultsMonthlyDao (`WITH months AS (SELECT generate_series(date_trunc('month', ... AT TIME
 -- ZONE ...), ..., interval '1 month') AS month) ...`).
 
+-- setup: force a deterministic session TimeZone so timestamptz rendering below is consistent
+-- regardless of the JVM's / PG server's default zone.
+SET TIME ZONE 'UTC';
+
 -- stmt 1: bare SELECT-list generate_series over timestamptz
 -- begin-expected
 -- columns: month
@@ -40,3 +44,6 @@ WITH months AS (
 -- row: 3
 -- end-expected
 SELECT generate_series(1, 3) AS n;
+
+-- cleanup: don't leak the session TimeZone override into files that run after this one.
+RESET TimeZone;
