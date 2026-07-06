@@ -947,8 +947,15 @@ class SelectExecutor {
                     }
                 }
                 if (sourceCol != null) {
+                    // Carry over domainTypeName/compositeTypeName/arrayElementType too, not just
+                    // enumTypeName+precision+scale -- dropping arrayElementType here made a
+                    // projected "region_t[]" column indistinguishable from a scalar "region_t"
+                    // column (both have type=ENUM, enumTypeName="region_t"), which caused
+                    // PgWireValueFormatter.columnTypeOid to advertise the enum element's OID
+                    // instead of the array's for e.g. "SELECT regions FROM sellers".
                     Column rc = new Column(alias, sourceCol.getType(), sourceCol.isNullable(), sourceCol.isPrimaryKey(), null,
-                            sourceCol.getEnumTypeName(), sourceCol.getPrecision(), sourceCol.getScale());
+                            sourceCol.getEnumTypeName(), sourceCol.getPrecision(), sourceCol.getScale(), null,
+                            sourceCol.getDomainTypeName(), sourceCol.getCompositeTypeName(), sourceCol.getArrayElementType());
                     if (sourceTableName != null) {
                         String schemaKey = sourceSchemaName != null ? sourceSchemaName : "public";
                         int tblOid = executor.systemCatalog.getOid("rel:" + schemaKey + "." + sourceTableName);
