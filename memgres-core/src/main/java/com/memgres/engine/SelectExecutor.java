@@ -1327,14 +1327,10 @@ class SelectExecutor {
      * an unnamed ENUM when it can't be determined.
      */
     private Column buildProjectedColumn(String alias, Expression expr, List<RowContext.TableBinding> bindings) {
-        DataType targetType = executor.inferTypeFromContext(expr, bindings);
-        if (targetType == DataType.ENUM) {
-            String enumTypeName = executor.resolveEnumTypeName(expr, bindings);
-            return enumTypeName != null
-                    ? new Column(alias, DataType.ENUM, true, false, null, enumTypeName)
-                    : new Column(alias, DataType.TEXT, true, false, null);
-        }
-        return new Column(alias, targetType, true, false, null);
+        // Delegates to ExprEvaluator.buildResultColumn, which also recognizes array_agg over a
+        // custom-enum element and advertises the enum's ARRAY type (wave-5, group 9) on top of
+        // the scalar-ENUM name recovery described above.
+        return executor.buildResultColumn(alias, expr, bindings);
     }
 
     /**
