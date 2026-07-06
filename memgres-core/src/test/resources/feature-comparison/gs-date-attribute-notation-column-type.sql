@@ -9,6 +9,10 @@
 -- and pgjdbc's strict getObject(col, LocalDate.class)/getDate rejected the value/type mismatch --
 -- exactly ResultsDailyDao.listByInstallationIdAndDate's shape.
 
+-- setup: force a deterministic session TimeZone so the zoneless timestamptz literals below
+-- interpret and render consistently regardless of the JVM's / PG server's default zone.
+SET TIME ZONE 'UTC';
+
 -- stmt 1: gs.date resolves via attribute notation; its value round-trips as a date
 -- begin-expected
 -- columns: key
@@ -28,3 +32,6 @@ FROM generate_series('2026-01-01'::timestamptz, '2026-01-03'::timestamptz, '1 da
 -- end-expected
 SELECT gs.key
 FROM generate_series('2026-01-01'::timestamptz, '2026-01-03'::timestamptz, '1 day'::interval) AS gs(key);
+
+-- cleanup: don't leak the session TimeZone override into files that run after this one.
+RESET TimeZone;
