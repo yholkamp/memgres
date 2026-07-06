@@ -1182,9 +1182,12 @@ public final class TypeCoercion {
         try { return OffsetDateTime.parse(s); } catch (DateTimeParseException e) { /* try more */ }
         try { return LocalDateTime.parse(s).atZone(zone).toOffsetDateTime(); } catch (DateTimeParseException e) { /* try more */ }
         try { return LocalDate.parse(s).atStartOfDay(zone).toOffsetDateTime(); } catch (DateTimeParseException e) { /* ignore */ }
-        // Use 22008 for well-formatted but out-of-range dates (e.g., 2024-02-30)
-        String errCode = val.toString().trim().matches("\\d{4}-\\d{2}-\\d{2}.*") ? "22008" : "22007";
-        throw new MemgresException("date/time field value out of range: \"" + val + "\"", errCode);
+        // Use 22008 "out of range" for well-formatted but out-of-range dates (e.g., 2024-02-30);
+        // garbage input gets 22007 with PG's "invalid input syntax" wording.
+        if (val.toString().trim().matches("\\d{4}-\\d{2}-\\d{2}.*")) {
+            throw new MemgresException("date/time field value out of range: \"" + val + "\"", "22008");
+        }
+        throw new MemgresException("invalid input syntax for type timestamp with time zone: \"" + val + "\"", "22007");
     }
 
     /** Pattern for a date, optionally followed by a time-of-day, followed by a trailing zone name/abbreviation. */
