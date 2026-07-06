@@ -2026,8 +2026,18 @@ class ExprEvaluator {
         }
         if (expr instanceof CastExpr) {
             CastExpr cast = (CastExpr) expr;
-            DataType dt = DataType.fromPgName(cast.typeName().replaceAll("\\(.*\\)", "").trim());
-            return dt != null ? dt : DataType.TEXT;
+            String typeName = cast.typeName().replaceAll("\\(.*\\)", "").trim();
+            DataType dt = DataType.fromPgName(typeName);
+            if (dt != null) return dt;
+            // fromPgName only recognizes built-in PG type names; a cast to a registered custom
+            // enum type (e.g. 'done'::my_status) infers ENUM, not TEXT, so a CASE/COALESCE built
+            // from such casts advertises the real enum type via resolveEnumTypeName below instead
+            // of the generic (OID-0) placeholder.
+            if (executor != null && executor.database != null
+                    && executor.database.getCustomEnum(typeName.toLowerCase()) != null) {
+                return DataType.ENUM;
+            }
+            return DataType.TEXT;
         }
         if (expr instanceof Literal) {
             Literal lit = (Literal) expr;
@@ -2278,6 +2288,68 @@ class ExprEvaluator {
 
     DataType inferExprType(Expression expr) {
         return inferTypeFromContext(expr, Cols.listOf());
+    }
+
+    /**
+     * When an expression's inferred type is {@link DataType#ENUM}, resolves the concrete enum
+     * type name so callers can advertise the real per-type OID in RowDescription (see
+     * {@code PgWireValueFormatter.columnTypeOid}, which falls back to the ENUM placeholder OID 0
+     * -- and crashes pgjdbc -- whenever a column's type is ENUM but its enum type name is null).
+     * {@link #inferTypeFromContext} already infers ENUM correctly for a plain column reference,
+     * but discards *which* enum it is for any built expression (COALESCE, CASE, an explicit cast,
+     * ...); this mirrors the same branches to recover that name wherever it's statically
+     * determinable. Returns {@code null} when it can't be determined (e.g. a user-defined
+     * function/aggregate return type, or divergent enum types on either side of a CASE/COALESCE)
+     * -- callers should then advertise TEXT rather than ENUM-with-no-name.
+     */
+    String resolveEnumTypeName(Expression expr, List<RowContext.TableBinding> bindings) {
+        if (expr instanceof ColumnRef) {
+            ColumnRef ref = (ColumnRef) expr;
+            for (RowContext.TableBinding b : bindings) {
+                if (ref.table() != null) {
+                    if (!ref.table().equalsIgnoreCase(b.alias()) &&
+                            !ref.table().equalsIgnoreCase(b.table().getName())) continue;
+                }
+                int idx = b.table().getColumnIndex(ref.column());
+                if (idx >= 0) return b.table().getColumns().get(idx).getEnumTypeName();
+            }
+            return null;
+        }
+        if (expr instanceof CastExpr) {
+            String typeName = ((CastExpr) expr).typeName().replaceAll("\\(.*\\)", "").trim().toLowerCase();
+            return executor.database.getCustomEnum(typeName) != null ? typeName : null;
+        }
+        if (expr instanceof FunctionCallExpr) {
+            FunctionCallExpr fn = (FunctionCallExpr) expr;
+            String name = FunctionEvaluator.stripSchemaPrefix(fn.name().toLowerCase());
+            if (name.equals("coalesce") || name.equals("nullif") || name.equals("greatest") || name.equals("least")
+                    || name.equals("max") || name.equals("min") || name.equals("first_value")
+                    || name.equals("last_value") || name.equals("nth_value") || name.equals("lag") || name.equals("lead")) {
+                for (Expression arg : fn.args()) {
+                    String n = resolveEnumTypeName(arg, bindings);
+                    if (n != null) return n;
+                }
+            }
+            return null;
+        }
+        if (expr instanceof CaseExpr) {
+            CaseExpr c = (CaseExpr) expr;
+            for (CaseExpr.WhenClause wc : c.whenClauses()) {
+                String n = resolveEnumTypeName(wc.result(), bindings);
+                if (n != null) return n;
+            }
+            if (c.elseExpr() != null) return resolveEnumTypeName(c.elseExpr(), bindings);
+            return null;
+        }
+        if (expr instanceof SubqueryExpr) {
+            SubqueryExpr sq = (SubqueryExpr) expr;
+            if (sq.subquery() instanceof SelectStmt && ((SelectStmt) sq.subquery()).targets() != null
+                    && !((SelectStmt) sq.subquery()).targets().isEmpty()) {
+                return resolveEnumTypeName(((SelectStmt) sq.subquery()).targets().get(0).expr(), bindings);
+            }
+            return null;
+        }
+        return null;
     }
 
     // ---- JSON path parsing ----
