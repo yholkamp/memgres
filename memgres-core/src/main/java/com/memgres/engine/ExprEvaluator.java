@@ -2171,8 +2171,20 @@ class ExprEvaluator {
             if (name.equals("now") || name.equals("current_timestamp")
                     || name.equals("statement_timestamp") || name.equals("clock_timestamp")
                     || name.equals("transaction_timestamp")) return DataType.TIMESTAMPTZ;
-            if (name.equals("current_date") || name.equals("date_trunc")
+            if (name.equals("current_date")
                     || name.equals("to_date") || name.equals("make_date")) return DataType.DATE;
+            if (name.equals("date_trunc")) {
+                // date_trunc(text, timestamp[tz]|interval[, text timezone]) returns the same
+                // type as its 2nd argument, never DATE. The previous blanket DataType.DATE was
+                // itself wrong (surfaced while fixing mtask-8 Group 2: date_trunc(...) is the
+                // generate_series start argument in ResultsMonthlyDao's months CTE, and a
+                // timestamptz value advertised/decoded as DATE corrupts pgjdbc's binary decode).
+                if (fn.args().size() >= 2) {
+                    DataType dt = inferTypeFromContext(fn.args().get(1), bindings);
+                    if (dt != null) return dt;
+                }
+                return DataType.TIMESTAMP;
+            }
             if (name.equals("coalesce") || name.equals("nullif") || name.equals("greatest") || name.equals("least")) {
                 for (Expression arg : fn.args()) {
                     DataType dt = inferTypeFromContext(arg, bindings);
@@ -2230,6 +2242,20 @@ class ExprEvaluator {
                 if (!fn.args().isEmpty()) return inferTypeFromContext(fn.args().get(0), bindings);
                 return DataType.TEXT;
             }
+            if (name.equals("generate_series")) {
+                // The SRF's advertised element type is the type of its first (start) argument:
+                // generate_series(int/bigint, ...) -> setof int/bigint,
+                // generate_series(timestamp[tz], ..., interval) -> setof timestamp[tz].
+                // Without this, a SELECT-list generate_series() (as opposed to one used in FROM,
+                // which is typed by FromFunctionResolver from the actual runtime values) fell
+                // through to the default DataType.TEXT below, so pgjdbc's strict getObject(col,
+                // LocalDate.class)/getTimestamp rejected the RowDescription/value mismatch.
+                if (!fn.args().isEmpty()) {
+                    DataType dt = inferTypeFromContext(fn.args().get(0), bindings);
+                    if (dt != null) return dt;
+                }
+                return DataType.TEXT;
+            }
             if (name.equals("uuid_generate_v4") || name.equals("gen_random_uuid") || name.equals("uuidv4")) return DataType.UUID;
             if (name.equals("json_serialize")) return DataType.TEXT;
             // Check user-defined functions and aggregates for return type
@@ -2258,6 +2284,17 @@ class ExprEvaluator {
                 }
             }
             return DataType.TEXT;
+        }
+        if (expr instanceof AtTimeZoneExpr) {
+            // PG semantics (mirrors the runtime AtTimeZoneExpr evaluation above): timestamptz AT
+            // TIME ZONE z -> timestamp; timestamp AT TIME ZONE z -> timestamptz. Falling through
+            // to the default DataType.TEXT here (as before this fix) is what let a SELECT-list
+            // generate_series() whose start argument is a date_trunc(...) AT TIME ZONE ... (the
+            // exact ResultsMonthlyDao months-CTE shape) advertise TEXT.
+            DataType inner = inferTypeFromContext(((AtTimeZoneExpr) expr).expr(), bindings);
+            if (inner == DataType.TIMESTAMPTZ) return DataType.TIMESTAMP;
+            if (inner == DataType.TIMESTAMP) return DataType.TIMESTAMPTZ;
+            return inner != null ? inner : DataType.TIMESTAMP;
         }
         if (expr instanceof IsNullExpr) return DataType.BOOLEAN;
         if (expr instanceof InExpr) return DataType.BOOLEAN;
