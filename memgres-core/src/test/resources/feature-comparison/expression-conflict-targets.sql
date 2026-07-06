@@ -1,47 +1,21 @@
--- Expression conflict targets: parenthesized expressions in UNIQUE constraint
--- column lists and ON CONFLICT targets, mixed with plain columns.
+-- Expression conflict targets: parenthesized expressions in ON CONFLICT targets and their
+-- matching CREATE UNIQUE INDEX arbiter, mixed with plain columns. Both constructs here are valid,
+-- standard PostgreSQL (expressions are legal in CREATE UNIQUE INDEX and in ON CONFLICT target
+-- lists) -- this file stays in the strict PG-diff comparison set.
 --
--- Regression coverage for mtask-6 Bug 5: DdlTableParser's inline UNIQUE
--- handling and DmlParser.parseOnConflict previously accepted only bare
--- identifiers in a column list, so a parenthesized expression anywhere in
--- the list (e.g. `UNIQUE (id, (data->>'k'))` or
--- `ON CONFLICT (queue_name, ((input->>'price_id')))`) threw
--- 42601 "Expected identifier".
+-- Regression coverage for mtask-6 Bug 5: DmlParser.parseOnConflict previously accepted only bare
+-- identifiers in a conflict-target column list, so a parenthesized expression anywhere in the
+-- list (e.g. `ON CONFLICT (queue_name, ((input->>'price_id')))`) threw 42601 "Expected identifier".
+--
+-- Note: the table-level `UNIQUE (id, (data->>'k'))` *constraint* form (as opposed to
+-- `CREATE UNIQUE INDEX ... (id, (data->>'k'))`) is not valid PostgreSQL syntax (42601 --
+-- expressions are only legal in CREATE UNIQUE INDEX); memgres's Bug 5 fix additionally supports it
+-- as a deliberate extension, covered separately in
+-- expression-unique-table-constraint-memgres-extension.sql (excluded from PG-diff parity).
 --
 -- Mirrors the real-world case in JobDao.insertPriceCheckJob / the
 -- jobs_price_check_one_pending partial unique index (double-parenthesized
 -- expression target with a WHERE predicate).
-
--- setup
-CREATE TABLE ect_t (id int, data jsonb, UNIQUE (id, (data->>'k')));
-
--- stmt 1: mixed column/expression UNIQUE constraint accepts a first row
-INSERT INTO ect_t (id, data) VALUES (1, '{"k":"a"}');
-
--- begin-expected
--- columns: count
--- row: 1
--- end-expected
-SELECT count(*) FROM ect_t;
-
--- stmt 2: duplicate (id, data->>'k') violates the mixed unique constraint
--- begin-expected-error
--- sqlstate: 23505
--- message-like: duplicate key value violates unique constraint
--- end-expected-error
-INSERT INTO ect_t (id, data) VALUES (1, '{"k":"a"}');
-
--- stmt 3: same id but a different expression value is allowed
-INSERT INTO ect_t (id, data) VALUES (1, '{"k":"b"}');
-
--- begin-expected
--- columns: count
--- row: 2
--- end-expected
-SELECT count(*) FROM ect_t;
-
--- cleanup
-DROP TABLE ect_t;
 
 -- setup: ON CONFLICT with a mixed column/expression target list, matching
 -- a partial unique index over the identical target (real-world JobDao shape).
@@ -57,7 +31,7 @@ CREATE UNIQUE INDEX ect_jobs_one_pending
 INSERT INTO ect_jobs_t (queue_name, input, state)
     VALUES ('price_check', '{"price_id":"p1"}', 'created');
 
--- stmt 4: a conflicting pending job for the same price_id is skipped (DO NOTHING)
+-- stmt 1: a conflicting pending job for the same price_id is skipped (DO NOTHING)
 INSERT INTO ect_jobs_t (queue_name, input, state)
     VALUES ('price_check', '{"price_id":"p1"}', 'created')
     ON CONFLICT (queue_name, ((input->>'price_id')))
@@ -70,7 +44,7 @@ INSERT INTO ect_jobs_t (queue_name, input, state)
 -- end-expected
 SELECT count(*) FROM ect_jobs_t;
 
--- stmt 5: a distinct price_id is not a conflict and inserts normally
+-- stmt 2: a distinct price_id is not a conflict and inserts normally
 INSERT INTO ect_jobs_t (queue_name, input, state)
     VALUES ('price_check', '{"price_id":"p2"}', 'created')
     ON CONFLICT (queue_name, ((input->>'price_id')))

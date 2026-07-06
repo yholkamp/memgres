@@ -251,27 +251,7 @@ class DmlExecutor {
 
             // Validate enum values and wrap as PgEnum for correct ordering
             for (int colIdx : filledCols) {
-                Column col = table.getColumns().get(colIdx);
-                if (col.getType() == DataType.ENUM && row[colIdx] != null) {
-                    // Skip validation for enum array columns; elements were already validated during ARRAY expression evaluation
-                    if (col.getArrayElementType() != null || (row[colIdx] instanceof String && ((String) row[colIdx]).startsWith("{"))) {
-                        String s = (String) row[colIdx];
-                        continue;
-                    }
-                    String enumTypeName = col.getEnumTypeName();
-                    if (enumTypeName != null) {
-                        CustomEnum customEnum = executor.database.getCustomEnum(enumTypeName);
-                        if (customEnum != null) {
-                            String label = row[colIdx] instanceof AstExecutor.PgEnum ? ((AstExecutor.PgEnum) row[colIdx]).label() : row[colIdx].toString();
-                            if (!customEnum.isValidLabel(label)) {
-                                throw new MemgresException(
-                                        "invalid input value for enum " + enumTypeName + ": \"" + label + "\"",
-                                        "22P02");
-                            }
-                            row[colIdx] = new AstExecutor.PgEnum(label, enumTypeName, customEnum.ordinal(label));
-                        }
-                    }
-                }
+                row[colIdx] = wrapEnumValue(table.getColumns().get(colIdx), row[colIdx]);
             }
 
             // Fill serial columns and defaults AFTER explicit values validated
@@ -290,7 +270,18 @@ class DmlExecutor {
                     row[i] = table.nextSerial();
                 } else if (col.getDefaultValue() != null) {
                     Object defVal = executor.evaluateDefault(col.getDefaultValue(), col.getType(), col.getParsedDefaultExpr());
-                    row[i] = TypeCoercion.coerceForStorage(defVal, col);
+                    // wrapEnumValue mirrors the filledCols loop above: a DEFAULT-populated ENUM
+                    // column previously stayed a raw Java String forever (TypeCoercion.coerce
+                    // has no ENUM case), so ordering comparisons (<, <=, ORDER BY, ...) silently
+                    // fell back to lexicographic string comparison instead of PG's declaration
+                    // order. This is the actual root cause behind the "ON CONFLICT expression
+                    // arbiter looks like it doesn't match" symptom (mtask-8 Group 6): the
+                    // partial-index/ON-CONFLICT WHERE predicate `state < 'active'` silently
+                    // evaluated false for a DEFAULT-valued job_state column ('created' > 'active'
+                    // lexicographically), so the conflict search bailed out early and the insert
+                    // proceeded, silently violating the unique index -- the arbiter/index
+                    // matching itself was already correct.
+                    row[i] = wrapEnumValue(col, TypeCoercion.coerceForStorage(defVal, col));
                 } else if (col.getDomainTypeName() != null) {
                     DomainType domain = executor.database.getDomain(col.getDomainTypeName());
                     if (domain != null && domain.getDefaultValue() != null) {
@@ -863,6 +854,32 @@ class DmlExecutor {
                 row[i] = TypeCoercion.coerceForStorage(defVal, col);
             }
         }
+    }
+
+    /**
+     * Validates an ENUM column's raw label and wraps it in an {@link AstExecutor.PgEnum} carrying
+     * its declared ordinal position, so downstream comparisons ({@code <}, {@code <=}, {@code >},
+     * {@code >=}, {@code ORDER BY}, simple {@code CASE}, ...) use PG's declaration-order semantics
+     * instead of silently falling back to lexicographic string comparison
+     * ({@code TypeCoercion.compare}/{@code coerce} have no ENUM case). Returns the value unchanged
+     * for non-ENUM columns, {@code null}, enum array columns, and array-literal text (whose
+     * elements are validated separately during ARRAY expression evaluation).
+     */
+    private Object wrapEnumValue(Column col, Object rawValue) {
+        if (col.getType() != DataType.ENUM || rawValue == null) return rawValue;
+        if (col.getArrayElementType() != null || (rawValue instanceof String && ((String) rawValue).startsWith("{"))) {
+            return rawValue;
+        }
+        String enumTypeName = col.getEnumTypeName();
+        if (enumTypeName == null) return rawValue;
+        CustomEnum customEnum = executor.database.getCustomEnum(enumTypeName);
+        if (customEnum == null) return rawValue;
+        String label = rawValue instanceof AstExecutor.PgEnum ? ((AstExecutor.PgEnum) rawValue).label() : rawValue.toString();
+        if (!customEnum.isValidLabel(label)) {
+            throw new MemgresException(
+                    "invalid input value for enum " + enumTypeName + ": \"" + label + "\"", "22P02");
+        }
+        return new AstExecutor.PgEnum(label, enumTypeName, customEnum.ordinal(label));
     }
 
     private Object resolveSerialNextVal(Column col) {
