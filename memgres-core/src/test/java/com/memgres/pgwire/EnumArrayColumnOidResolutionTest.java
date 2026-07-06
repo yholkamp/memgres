@@ -62,16 +62,38 @@ class EnumArrayColumnOidResolutionTest {
         try (Statement s = conn.createStatement()) { s.execute(sql); }
     }
 
-    static void setupSellers(Connection conn) throws SQLException {
+    /**
+     * How the enum-array column comes to exist. The downstream app's real schema adds
+     * {@code sellers.regions region_type[]} via {@code ALTER TABLE sellers ADD ...}, not
+     * CREATE TABLE — and {@code DdlAlterTableExecutor.executeAddColumn}/{@code executeSetType}
+     * each rebuild the {@link com.memgres.engine.Column} without carrying the resolved
+     * {@code arrayElementType} (and, for SetType, without the resolved {@code enumTypeName}),
+     * so all three DDL paths must be pinned independently.
+     */
+    enum ColumnDdlPath { CREATE_TABLE, ALTER_TABLE_ADD, ALTER_COLUMN_TYPE }
+
+    static void setupSellers(Connection conn, ColumnDdlPath path) throws SQLException {
         exec(conn, "DROP TABLE IF EXISTS eacor_sellers");
         exec(conn, "DROP TYPE IF EXISTS eacor_region");
         exec(conn, "CREATE TYPE eacor_region AS ENUM ('north', 'south', 'east', 'west')");
-        exec(conn, "CREATE TABLE eacor_sellers (id serial primary key, name text, regions eacor_region[])");
+        switch (path) {
+            case CREATE_TABLE:
+                exec(conn, "CREATE TABLE eacor_sellers (id serial primary key, name text, regions eacor_region[])");
+                break;
+            case ALTER_TABLE_ADD:
+                exec(conn, "CREATE TABLE eacor_sellers (id serial primary key, name text)");
+                exec(conn, "ALTER TABLE eacor_sellers ADD regions eacor_region[]");
+                break;
+            case ALTER_COLUMN_TYPE:
+                exec(conn, "CREATE TABLE eacor_sellers (id serial primary key, name text, regions text)");
+                exec(conn, "ALTER TABLE eacor_sellers ALTER COLUMN regions TYPE eacor_region[]");
+                break;
+        }
         exec(conn, "INSERT INTO eacor_sellers(name, regions) VALUES ('acme', ARRAY['north','south']::eacor_region[])");
     }
 
-    static void assertArrayRoundTrips(Connection conn) throws SQLException {
-        setupSellers(conn);
+    static void assertArrayRoundTrips(Connection conn, ColumnDdlPath path) throws SQLException {
+        setupSellers(conn, path);
         try (Statement s = conn.createStatement();
              ResultSet rs = s.executeQuery("SELECT id, name, regions FROM eacor_sellers ORDER BY name")) {
             assertTrue(rs.next());
@@ -91,19 +113,8 @@ class EnumArrayColumnOidResolutionTest {
         }
     }
 
-    @Test
-    void enumArrayColumn_readsCorrectly_overTextTransfer() throws SQLException {
-        assertArrayRoundTrips(textConn);
-    }
-
-    @Test
-    void enumArrayColumn_readsCorrectly_overBinaryTransfer() throws SQLException {
-        assertArrayRoundTrips(binaryConn);
-    }
-
-    @Test
-    void getColumnTypeName_on_enum_array_column_resolves_array_type_name() throws SQLException {
-        setupSellers(textConn);
+    static void assertColumnTypeNameIsArrayTypeName(ColumnDdlPath path) throws SQLException {
+        setupSellers(textConn, path);
         try (Statement s = textConn.createStatement();
              ResultSet rs = s.executeQuery("SELECT regions FROM eacor_sellers")) {
             ResultSetMetaData md = rs.getMetaData();
@@ -115,6 +126,51 @@ class EnumArrayColumnOidResolutionTest {
             exec(textConn, "DROP TABLE IF EXISTS eacor_sellers");
             exec(textConn, "DROP TYPE IF EXISTS eacor_region");
         }
+    }
+
+    @Test
+    void enumArrayColumn_readsCorrectly_overTextTransfer() throws SQLException {
+        assertArrayRoundTrips(textConn, ColumnDdlPath.CREATE_TABLE);
+    }
+
+    @Test
+    void enumArrayColumn_readsCorrectly_overBinaryTransfer() throws SQLException {
+        assertArrayRoundTrips(binaryConn, ColumnDdlPath.CREATE_TABLE);
+    }
+
+    @Test
+    void getColumnTypeName_on_enum_array_column_resolves_array_type_name() throws SQLException {
+        assertColumnTypeNameIsArrayTypeName(ColumnDdlPath.CREATE_TABLE);
+    }
+
+    @Test
+    void alterTableAddColumn_enumArray_readsCorrectly_overTextTransfer() throws SQLException {
+        assertArrayRoundTrips(textConn, ColumnDdlPath.ALTER_TABLE_ADD);
+    }
+
+    @Test
+    void alterTableAddColumn_enumArray_readsCorrectly_overBinaryTransfer() throws SQLException {
+        assertArrayRoundTrips(binaryConn, ColumnDdlPath.ALTER_TABLE_ADD);
+    }
+
+    @Test
+    void alterTableAddColumn_enumArray_columnTypeName_isArrayTypeName() throws SQLException {
+        assertColumnTypeNameIsArrayTypeName(ColumnDdlPath.ALTER_TABLE_ADD);
+    }
+
+    @Test
+    void alterColumnType_toEnumArray_readsCorrectly_overTextTransfer() throws SQLException {
+        assertArrayRoundTrips(textConn, ColumnDdlPath.ALTER_COLUMN_TYPE);
+    }
+
+    @Test
+    void alterColumnType_toEnumArray_readsCorrectly_overBinaryTransfer() throws SQLException {
+        assertArrayRoundTrips(binaryConn, ColumnDdlPath.ALTER_COLUMN_TYPE);
+    }
+
+    @Test
+    void alterColumnType_toEnumArray_columnTypeName_isArrayTypeName() throws SQLException {
+        assertColumnTypeNameIsArrayTypeName(ColumnDdlPath.ALTER_COLUMN_TYPE);
     }
 
     /** Regression guard: the scalar enum OID path (mtask-6 Bug 7) must be unaffected. */
