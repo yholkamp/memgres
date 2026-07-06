@@ -653,6 +653,10 @@ public class AstExecutor {
         return exprEvaluator.inferExprType(expr);
     }
 
+    String resolveEnumTypeName(Expression expr, List<RowContext.TableBinding> bindings) {
+        return exprEvaluator.resolveEnumTypeName(expr, bindings);
+    }
+
     @SuppressWarnings("unchecked")
     int compareValues(Object a, Object b) {
         return exprEvaluator.compareValues(a, b);
