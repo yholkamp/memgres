@@ -233,6 +233,52 @@ class FromFunctionAttributeNotationTest {
         }
     }
 
+    // ---- Wave 3 (mtask-8 group 7): the projected column type for a qualified reference that
+    // resolves via the attribute-notation fallback must mirror the runtime resolution -- the cast
+    // target type (date(gs) -> DATE here) -- instead of defaulting to TEXT. Real PostgreSQL
+    // advertises "date"; pgjdbc's strict getObject(col, LocalDate.class)/getDate then rejects a
+    // TEXT-typed column with "Cannot convert the column of type TEXT to requested type
+    // java.time.LocalDate". Mirrors the app's ResultsDailyDao.listByInstallationIdAndDate shape.
+
+    @Test
+    void gsDateAttributeNotation_columnAdvertisesDateNotText() throws SQLException {
+        try (Statement s = conn.createStatement();
+             ResultSet rs = s.executeQuery(
+                     "SELECT gs.date AS key "
+                             + "FROM generate_series('2026-01-01'::timestamptz, '2026-01-05'::timestamptz, '1 day'::interval) AS gs(key)")) {
+            assertEquals("date", rs.getMetaData().getColumnTypeName(1));
+            List<LocalDate> dates = new ArrayList<>();
+            while (rs.next()) {
+                // getObject(..., LocalDate.class) is what pgjdbc used to reject when the column
+                // was mistakenly advertised as TEXT ("Cannot convert the column of type TEXT to
+                // requested type java.time.LocalDate").
+                dates.add(rs.getObject(1, LocalDate.class));
+            }
+            assertEquals(
+                    List.of(LocalDate.of(2026, 1, 1), LocalDate.of(2026, 1, 2), LocalDate.of(2026, 1, 3),
+                            LocalDate.of(2026, 1, 4), LocalDate.of(2026, 1, 5)),
+                    dates);
+        }
+    }
+
+    @Test
+    void gsKeyColumnType_stillAdvertisesTimestamptz() throws SQLException {
+        // Control: the real (non-fallback) column must keep its own type -- column-wins semantics
+        // must hold for type inference exactly as they do at runtime.
+        try (Statement s = conn.createStatement();
+             ResultSet rs = s.executeQuery(
+                     "SELECT gs.key "
+                             + "FROM generate_series('2026-01-01'::timestamptz, '2026-01-05'::timestamptz, '1 day'::interval) AS gs(key)")) {
+            assertEquals("timestamptz", rs.getMetaData().getColumnTypeName(1));
+            int count = 0;
+            while (rs.next()) {
+                count++;
+                assertNotNull(rs.getTimestamp(1));
+            }
+            assertEquals(5, count);
+        }
+    }
+
     // ---- Unknown attribute must still raise 42703 ----
 
     @Test
