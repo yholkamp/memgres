@@ -44,6 +44,27 @@ class CastEvaluator {
         this.executor = executor;
     }
 
+    /**
+     * Resolves the zone to use when interpreting a zoneless timestamptz literal.
+     * Follows the session TimeZone GUC only when it has been explicitly SET for this session
+     * (matching PG's "session TimeZone governs interpretation" semantics); otherwise falls back
+     * to the JVM's default zone, preserving memgres's historical default behavior.
+     */
+    private java.time.ZoneId sessionInterpretationZone() {
+        if (executor.session != null) {
+            GucSettings guc = executor.session.getGucSettings();
+            if (guc.hasSessionOverride("timezone")) {
+                String tz = guc.get("timezone");
+                if (tz != null) {
+                    try {
+                        return java.time.ZoneId.of(tz);
+                    } catch (Exception ignored) { /* fall back to JVM default below */ }
+                }
+            }
+        }
+        return java.time.ZoneId.systemDefault();
+    }
+
     Object applyCast(Object val, String typeSpec) {
         if (val == null) return null;
         // JSON/JSONB null literal → SQL NULL when cast to any other type
@@ -344,7 +365,7 @@ class CastEvaluator {
                 return TypeCoercion.toLocalDateTimeOrInfinity(val);
             case "timestamptz":
             case "timestamp with time zone":
-                return TypeCoercion.toOffsetDateTime(val);
+                return TypeCoercion.toOffsetDateTime(val, sessionInterpretationZone());
             case "interval":
             case "interval year to month":
             case "interval day to second":
