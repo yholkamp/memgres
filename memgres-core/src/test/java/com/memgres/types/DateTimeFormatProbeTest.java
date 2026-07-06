@@ -190,6 +190,40 @@ class DateTimeFormatProbeTest {
         assertNotNull(scalar("SELECT '2024-01-08 04:05:06 Europe/Amsterdam'::timestamptz::text"));
     }
 
+    @Test void timestamptz_named_tz_abbreviation_date_only() throws Exception {
+        // No time-of-day component at all — just a date followed by a zone abbreviation.
+        exec("SET TimeZone = 'UTC'");
+        assertEquals("2024-01-01 00:00:00+00",
+                scalar("SELECT timestamptz '2024-01-01 UTC'"));
+    }
+
+    @Test void timestamptz_named_tz_region_date_only() throws Exception {
+        // Date-only literal with an IANA region name suffix (no time-of-day).
+        exec("SET TimeZone = 'UTC'");
+        // Midnight in Amsterdam on 2024-01-01 is CET (+01:00) = 2023-12-31 23:00:00 UTC.
+        assertEquals("2023-12-31 23:00:00+00",
+                scalar("SELECT timestamptz '2024-01-01 Europe/Amsterdam'"));
+    }
+
+    @Test void timestamptz_named_tz_abbreviation_hhmm_no_seconds() throws Exception {
+        // Time-of-day without seconds ("HH:MM") followed by a zone abbreviation.
+        exec("SET TimeZone = 'UTC'");
+        assertEquals("2024-01-01 11:00:00+00",
+                scalar("SELECT timestamptz '2024-01-01 12:00 CET'"));
+    }
+
+    @Test void timestamp_ignores_trailing_zone_abbreviation() throws Exception {
+        // PG parses (and validates) a trailing zone name on a plain `timestamp` literal,
+        // but ignores it: the wall-clock value is taken as-is.
+        assertEquals("2024-01-01 12:00:00",
+                scalar("SELECT timestamp '2024-01-01 12:00:00 UTC'"));
+    }
+
+    @Test void timestamp_ignores_trailing_zone_region_date_only() throws Exception {
+        assertEquals("2024-01-01 00:00:00",
+                scalar("SELECT timestamp '2024-01-01 Europe/Amsterdam'"));
+    }
+
     @Test void timestamptz_special_epoch() throws Exception {
         exec("SET TimeZone = 'UTC'");
         assertEquals("1970-01-01 00:00:00+00",
