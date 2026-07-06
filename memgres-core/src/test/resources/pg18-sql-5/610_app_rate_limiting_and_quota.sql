@@ -27,9 +27,15 @@ INSERT INTO quotas(user_id, daily_limit, used_count) VALUES
 (2, 2, 2),
 (3, 10, 0);
 
+-- Real PostgreSQL: user_id=1 rows at 10:00:00 / 10:00:20 / 10:00:50 all fall in
+-- [10:00:00, 10:01:00) -> recent_count is 3 (the row at 10:02 is excluded). The previous
+-- "row: 0" annotation here had baked in a memgres bug (mtask-8 Group 3: an untyped text literal
+-- compared against a timestamp column fell through to lexicographic string comparison, where
+-- 'T' > ' ' made every stored timestamp compare greater than every bound/literal text operand
+-- regardless of value) rather than actual PG semantics.
 -- begin-expected
 -- columns: recent_count
--- row: 0
+-- row: 3
 -- end-expected
 SELECT COUNT(*) AS recent_count
 FROM api_requests

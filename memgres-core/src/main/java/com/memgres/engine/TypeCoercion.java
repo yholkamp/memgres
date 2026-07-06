@@ -1327,6 +1327,23 @@ public final class TypeCoercion {
             return toLocalDateTime(a).compareTo(toLocalDateTime(b));
         }
 
+        // Temporal value vs. an unknown-type text operand (e.g. a bound parameter/literal PG
+        // hasn't resolved a concrete type for, such as jdbi's Instant -> setTimestamp -> pgjdbc
+        // Oid.UNSPECIFIED text bind): PostgreSQL resolves the untyped text against the other
+        // operand's type before comparing. Coerce the text side to the temporal type instead of
+        // falling through to lexicographic string comparison below, which silently miscompares
+        // ISO 'T'-separated temporal text against PG's ' '-separated format (ordering by ASCII
+        // punctuation, not by instant) — every bound timestamptz range filter was silently
+        // empty/wrong. Mirrors the UUID-vs-String special case above. Unparseable text raises the
+        // same 22007/22008 errors the temporal coercion helpers already raise for bad input,
+        // matching PostgreSQL's behavior for invalid literals.
+        if (isDateTime(a) && b instanceof String) {
+            return compareTemporalToText(a, (String) b);
+        }
+        if (isDateTime(b) && a instanceof String) {
+            return -compareTemporalToText(b, (String) a);
+        }
+
         // Number vs string: try numeric comparison
         if (a instanceof Number || b instanceof Number) {
             try {
@@ -1559,6 +1576,31 @@ public final class TypeCoercion {
         return val instanceof LocalDate || val instanceof LocalDateTime ||
                val instanceof OffsetDateTime || val instanceof LocalTime ||
                val instanceof PgInterval;
+    }
+
+    /**
+     * Compares a temporal value against a text operand by coercing the text to the same
+     * temporal type first (see the call site in {@link #compare(Object, Object)} for rationale).
+     * {@code OffsetDateTime} compares by instant (matching timestamptz semantics: two
+     * differently-offset representations of the same instant are equal).
+     */
+    private static int compareTemporalToText(Object temporal, String text) {
+        if (temporal instanceof OffsetDateTime) {
+            return ((OffsetDateTime) temporal).toInstant().compareTo(toOffsetDateTime(text).toInstant());
+        }
+        if (temporal instanceof LocalDateTime) {
+            return ((LocalDateTime) temporal).compareTo(toLocalDateTime(text));
+        }
+        if (temporal instanceof LocalDate) {
+            return ((LocalDate) temporal).compareTo(toLocalDate(text));
+        }
+        if (temporal instanceof LocalTime) {
+            return ((LocalTime) temporal).compareTo(toLocalTime(text));
+        }
+        if (temporal instanceof PgInterval) {
+            return ((PgInterval) temporal).compareTo(toInterval(text));
+        }
+        throw new IllegalStateException("unreachable: isDateTime guarded the caller");
     }
 
     /**
