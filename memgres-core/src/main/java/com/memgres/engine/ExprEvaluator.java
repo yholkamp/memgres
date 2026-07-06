@@ -580,6 +580,34 @@ class ExprEvaluator {
     }
 
     /**
+     * Type-inference counterpart of {@link #tryAttributeNotationFallback}, used by
+     * {@link #inferTypeFromContext} (the RowDescription/Describe type-inference layer, see
+     * {@code SelectExecutor.buildProjectedColumn}) so a qualified reference that will resolve via
+     * the attribute-notation fallback at runtime advertises the *same* type it will actually
+     * produce, instead of the generic {@code DataType.TEXT} default. Mirrors the runtime guard
+     * exactly (SRF-provenance binding, exactly one column) and mirrors the two resolution
+     * attempts: a cast/type name (via {@link DataType#fromPgName}, matching what
+     * {@code CastEvaluator.applyCast} would resolve to) or a registered single-arg function's
+     * declared return type. Returns {@code null} when the fallback doesn't apply or {@code
+     * funcOrCastName} isn't a recognized cast/function name — callers then fall through to their
+     * own default (TEXT).
+     */
+    private DataType inferAttributeNotationFallbackType(RowContext.TableBinding binding, String funcOrCastName) {
+        if (!binding.table().isFunctionResult()) return null;
+        if (binding.table().getColumns().size() != 1) return null;
+        DataType castType = DataType.fromPgName(funcOrCastName);
+        if (castType != null) return castType;
+        if (executor != null && executor.database != null) {
+            PgFunction userFunc = executor.database.getFunction(funcOrCastName.toLowerCase());
+            if (userFunc != null && userFunc.getReturnType() != null) {
+                DataType dt = DataType.fromPgName(userFunc.getReturnType().replaceAll("\\(.*\\)", "").trim());
+                if (dt != null) return dt;
+            }
+        }
+        return null;
+    }
+
+    /**
      * If val is a TableoidRef, resolve it to the actual OID integer via SystemCatalog.
      */
     private Object resolveTableoidRef(Object val) {
@@ -2009,6 +2037,16 @@ class ExprEvaluator {
                 }
                 int idx = b.table().getColumnIndex(ref.column());
                 if (idx >= 0) return b.table().getColumns().get(idx).getType();
+                // Column-wins semantics: a real column always takes precedence. Only once no
+                // column named ref.column() exists on this qualified binding do we mirror
+                // tryAttributeNotationFallback's runtime resolution (alias.name -> name(alias))
+                // for type-inference purposes, so the projected Column's DataType matches what
+                // will actually be produced at evaluation time (e.g. gs.date -> date(gs) -> DATE)
+                // instead of silently defaulting to TEXT below.
+                if (ref.table() != null) {
+                    DataType fallbackType = inferAttributeNotationFallbackType(b, ref.column());
+                    if (fallbackType != null) return fallbackType;
+                }
             }
             return DataType.TEXT;
         }
