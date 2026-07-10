@@ -73,6 +73,30 @@ class SessionStateGucTest {
         assertEquals("UTC", scalar("SHOW timezone"));
     }
 
+    @Test void timezone_governs_interpretation_of_zoneless_timestamptz_literal() throws Exception {
+        // A zoneless timestamptz literal must be *interpreted* in the session TimeZone,
+        // not just rendered in it — otherwise the resulting instant is environment-dependent
+        // (e.g. depends on the JVM's default zone) instead of following the session GUC,
+        // which is how real PostgreSQL behaves.
+        exec("SET TimeZone = 'UTC'");
+        assertEquals("2026-01-01 00:00:00+00",
+                scalar("SELECT '2026-01-01'::timestamptz::text"));
+
+        exec("CREATE TABLE tz_interp_test(ts timestamptz)");
+        try {
+            exec("SET TimeZone = 'US/Eastern'");
+            exec("INSERT INTO tz_interp_test VALUES ('2026-01-01'::timestamptz)");
+            exec("SET TimeZone = 'UTC'");
+            // Midnight Eastern (UTC-5 in January, EST) on 2026-01-01 is 05:00 UTC — this only
+            // holds if the literal was *interpreted* under the US/Eastern session zone that was
+            // active at INSERT time, not the JVM's default zone.
+            assertEquals("2026-01-01 05:00:00+00", scalar("SELECT ts::text FROM tz_interp_test"));
+        } finally {
+            exec("DROP TABLE tz_interp_test");
+            exec("SET TimeZone = 'UTC'");
+        }
+    }
+
     @Test void invalid_timezone_raises_error() throws Exception {
         SQLException ex = assertThrows(SQLException.class, () -> exec("SET TimeZone = 'NoSuch/Zone'"));
         assertEquals("22023", ex.getSQLState());

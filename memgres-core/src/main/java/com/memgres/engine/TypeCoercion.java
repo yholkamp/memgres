@@ -1107,6 +1107,17 @@ public final class TypeCoercion {
         if (s.equalsIgnoreCase("today")) return LocalDate.now().atStartOfDay();
         if (s.equalsIgnoreCase("yesterday")) return LocalDate.now().minusDays(1).atStartOfDay();
         if (s.equalsIgnoreCase("tomorrow")) return LocalDate.now().plusDays(1).atStartOfDay();
+        // A `timestamp` (without time zone) literal may still carry a trailing zone name/
+        // abbreviation (e.g. "2024-01-01 12:00:00 UTC"); PG parses and validates it but
+        // otherwise ignores it — the wall-clock value is taken as-is.
+        String[] trailingZone = extractTrailingZoneSuffix(s);
+        if (trailingZone != null) {
+            try {
+                return trailingZone[0].contains("T")
+                        ? LocalDateTime.parse(trailingZone[0])
+                        : LocalDate.parse(trailingZone[0]).atStartOfDay();
+            } catch (DateTimeParseException ignore) { /* fall through to normal handling below */ }
+        }
         // Handle "YYYY-MM-DD HH:MM:SS" (space instead of T) — only replace the date-time separator
         s = replaceDateTimeSeparator(s);
         // Normalize timezone offset in case there's a space before it or compact +HHMM
@@ -1120,48 +1131,93 @@ public final class TypeCoercion {
         throw new MemgresException("invalid input syntax for type timestamp: \"" + val + "\"", errCode);
     }
 
+    /** Parse a value as timestamptz, interpreting any zoneless literal in the JVM's default zone. */
     public static OffsetDateTime toOffsetDateTime(Object val) {
+        return toOffsetDateTime(val, ZoneId.systemDefault());
+    }
+
+    /**
+     * Parse a value as timestamptz, interpreting any zoneless literal in {@code zone}
+     * (the effective session TimeZone). A literal that carries its own explicit offset or
+     * named zone suffix is always interpreted using that offset/zone instead, matching PG.
+     */
+    public static OffsetDateTime toOffsetDateTime(Object val, ZoneId zone) {
         if (val instanceof OffsetDateTime) return ((OffsetDateTime) val);
-        if (val instanceof LocalDateTime) return ((LocalDateTime) val).atZone(ZoneId.systemDefault()).toOffsetDateTime();
-        if (val instanceof LocalDate) return ((LocalDate) val).atStartOfDay(ZoneId.systemDefault()).toOffsetDateTime();
+        if (val instanceof LocalDateTime) return ((LocalDateTime) val).atZone(zone).toOffsetDateTime();
+        if (val instanceof LocalDate) return ((LocalDate) val).atStartOfDay(zone).toOffsetDateTime();
         String s = val.toString().trim();
         // Handle special keywords
         if (s.equalsIgnoreCase("epoch")) return OffsetDateTime.of(1970, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC);
-        if (s.equalsIgnoreCase("now")) return OffsetDateTime.now();
-        if (s.equalsIgnoreCase("today")) return LocalDate.now().atStartOfDay(ZoneId.systemDefault()).toOffsetDateTime();
-        if (s.equalsIgnoreCase("yesterday")) return LocalDate.now().minusDays(1).atStartOfDay(ZoneId.systemDefault()).toOffsetDateTime();
-        if (s.equalsIgnoreCase("tomorrow")) return LocalDate.now().plusDays(1).atStartOfDay(ZoneId.systemDefault()).toOffsetDateTime();
+        if (s.equalsIgnoreCase("now")) return OffsetDateTime.now(zone);
+        if (s.equalsIgnoreCase("today")) return LocalDate.now(zone).atStartOfDay(zone).toOffsetDateTime();
+        if (s.equalsIgnoreCase("yesterday")) return LocalDate.now(zone).minusDays(1).atStartOfDay(zone).toOffsetDateTime();
+        if (s.equalsIgnoreCase("tomorrow")) return LocalDate.now(zone).plusDays(1).atStartOfDay(zone).toOffsetDateTime();
         if (s.equalsIgnoreCase("infinity")) return OffsetDateTime.of(TIMESTAMP_INFINITY, ZoneOffset.UTC);
         if (s.equalsIgnoreCase("-infinity")) return OffsetDateTime.of(TIMESTAMP_NEG_INFINITY, ZoneOffset.UTC);
-        // Try named timezone region or abbreviation: "2024-01-01 13:00:00 Europe/Amsterdam" or "... PST"
-        java.util.regex.Matcher tzMatcher = java.util.regex.Pattern
-                .compile("^(\\d{4}-\\d{2}-\\d{2}[T ]\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?)\\s+([A-Za-z][A-Za-z0-9_/+-]*)$")
-                .matcher(s);
-        if (tzMatcher.matches()) {
-            String dtPart = replaceDateTimeSeparator(tzMatcher.group(1));
-            String tzName = tzMatcher.group(2);
-            // Try timezone abbreviation first
-            String abbrevOffset = TZ_ABBREVIATIONS.get(tzName.toUpperCase());
-            if (abbrevOffset != null) {
-                try {
-                    return OffsetDateTime.parse(dtPart + abbrevOffset);
-                } catch (Exception ignore) { /* fall through */ }
-            }
-            // Try as ZoneId region
+        // Try a named timezone region or abbreviation suffix, e.g. "2024-01-01 13:00:00 Europe/Amsterdam",
+        // "2024-01-01 12:00 CET", or a date-only "2024-01-01 UTC" (no time-of-day at all).
+        String[] trailingZone = extractTrailingZoneSuffix(s);
+        if (trailingZone != null) {
+            String dtPart = trailingZone[0];
+            String tzName = trailingZone[1];
             try {
-                java.time.ZoneId zone = java.time.ZoneId.of(tzName);
-                return LocalDateTime.parse(dtPart).atZone(zone).toOffsetDateTime();
-            } catch (Exception ignore) { /* fall through */ }
+                LocalDateTime ldt = dtPart.contains("T") ? LocalDateTime.parse(dtPart) : LocalDate.parse(dtPart).atStartOfDay();
+                // Try timezone abbreviation first
+                String abbrevOffset = TZ_ABBREVIATIONS.get(tzName.toUpperCase());
+                if (abbrevOffset != null) {
+                    try {
+                        return ldt.atOffset(ZoneOffset.of(abbrevOffset));
+                    } catch (Exception ignore) { /* fall through */ }
+                }
+                // Try as ZoneId region
+                try {
+                    java.time.ZoneId namedZone = java.time.ZoneId.of(tzName);
+                    return ldt.atZone(namedZone).toOffsetDateTime();
+                } catch (Exception ignore) { /* fall through */ }
+            } catch (DateTimeParseException ignore) { /* fall through */ }
         }
         // Replace only the date-time separator space, normalize offset format
         s = replaceDateTimeSeparator(s);
         s = normalizeTimezoneOffset(s);
         try { return OffsetDateTime.parse(s); } catch (DateTimeParseException e) { /* try more */ }
-        try { return LocalDateTime.parse(s).atZone(ZoneId.systemDefault()).toOffsetDateTime(); } catch (DateTimeParseException e) { /* try more */ }
-        try { return LocalDate.parse(s).atStartOfDay(ZoneId.systemDefault()).toOffsetDateTime(); } catch (DateTimeParseException e) { /* ignore */ }
-        // Use 22008 for well-formatted but out-of-range dates (e.g., 2024-02-30)
-        String errCode = val.toString().trim().matches("\\d{4}-\\d{2}-\\d{2}.*") ? "22008" : "22007";
-        throw new MemgresException("date/time field value out of range: \"" + val + "\"", errCode);
+        try { return LocalDateTime.parse(s).atZone(zone).toOffsetDateTime(); } catch (DateTimeParseException e) { /* try more */ }
+        try { return LocalDate.parse(s).atStartOfDay(zone).toOffsetDateTime(); } catch (DateTimeParseException e) { /* ignore */ }
+        // Use 22008 "out of range" for well-formatted but out-of-range dates (e.g., 2024-02-30);
+        // garbage input gets 22007 with PG's "invalid input syntax" wording.
+        if (val.toString().trim().matches("\\d{4}-\\d{2}-\\d{2}.*")) {
+            throw new MemgresException("date/time field value out of range: \"" + val + "\"", "22008");
+        }
+        throw new MemgresException("invalid input syntax for type timestamp with time zone: \"" + val + "\"", "22007");
+    }
+
+    /** Pattern for a date, optionally followed by a time-of-day, followed by a trailing zone name/abbreviation. */
+    private static final java.util.regex.Pattern TRAILING_ZONE_SUFFIX_PATTERN = java.util.regex.Pattern.compile(
+            "^(\\d{4}-\\d{2}-\\d{2})(?:[T ](\\d{2}:\\d{2}(?::\\d{2}(?:\\.\\d+)?)?))?\\s+([A-Za-z][A-Za-z0-9_/+-]*)$");
+
+    /**
+     * If {@code s} is a date (optionally with a time-of-day) followed by a recognized trailing
+     * zone name or abbreviation (e.g. "2024-01-01 UTC", "2024-01-01 12:00 CET",
+     * "2024-01-01 12:00:00 Europe/Amsterdam"), returns a 2-element array of
+     * {dtPart (date, or "date'T'time"), zoneName}. Returns {@code null} if there is no such
+     * suffix, or the trailing token isn't a recognized zone abbreviation/region (so callers can
+     * fall back to normal offset-based parsing, preserving prior error behavior for garbage input).
+     */
+    private static String[] extractTrailingZoneSuffix(String s) {
+        java.util.regex.Matcher m = TRAILING_ZONE_SUFFIX_PATTERN.matcher(s);
+        if (!m.matches()) return null;
+        String datePart = m.group(1);
+        String timePart = m.group(2);
+        String tzName = m.group(3);
+        boolean recognized = TZ_ABBREVIATIONS.containsKey(tzName.toUpperCase());
+        if (!recognized) {
+            try {
+                java.time.ZoneId.of(tzName);
+                recognized = true;
+            } catch (Exception ignore) { /* not a recognized zone */ }
+        }
+        if (!recognized) return null;
+        String dtPart = timePart != null ? (datePart + "T" + timePart) : datePart;
+        return new String[]{dtPart, tzName};
     }
 
     public static PgInterval toInterval(Object val) {
@@ -1325,6 +1381,23 @@ public final class TypeCoercion {
         // Cross-type date/time: coerce to common type
         if (isDateTime(a) && isDateTime(b)) {
             return toLocalDateTime(a).compareTo(toLocalDateTime(b));
+        }
+
+        // Temporal value vs. an unknown-type text operand (e.g. a bound parameter/literal PG
+        // hasn't resolved a concrete type for, such as jdbi's Instant -> setTimestamp -> pgjdbc
+        // Oid.UNSPECIFIED text bind): PostgreSQL resolves the untyped text against the other
+        // operand's type before comparing. Coerce the text side to the temporal type instead of
+        // falling through to lexicographic string comparison below, which silently miscompares
+        // ISO 'T'-separated temporal text against PG's ' '-separated format (ordering by ASCII
+        // punctuation, not by instant) — every bound timestamptz range filter was silently
+        // empty/wrong. Mirrors the UUID-vs-String special case above. Unparseable text raises the
+        // same 22007/22008 errors the temporal coercion helpers already raise for bad input,
+        // matching PostgreSQL's behavior for invalid literals.
+        if (isDateTime(a) && b instanceof String) {
+            return compareTemporalToText(a, (String) b);
+        }
+        if (isDateTime(b) && a instanceof String) {
+            return -compareTemporalToText(b, (String) a);
         }
 
         // Number vs string: try numeric comparison
@@ -1559,6 +1632,31 @@ public final class TypeCoercion {
         return val instanceof LocalDate || val instanceof LocalDateTime ||
                val instanceof OffsetDateTime || val instanceof LocalTime ||
                val instanceof PgInterval;
+    }
+
+    /**
+     * Compares a temporal value against a text operand by coercing the text to the same
+     * temporal type first (see the call site in {@link #compare(Object, Object)} for rationale).
+     * {@code OffsetDateTime} compares by instant (matching timestamptz semantics: two
+     * differently-offset representations of the same instant are equal).
+     */
+    private static int compareTemporalToText(Object temporal, String text) {
+        if (temporal instanceof OffsetDateTime) {
+            return ((OffsetDateTime) temporal).toInstant().compareTo(toOffsetDateTime(text).toInstant());
+        }
+        if (temporal instanceof LocalDateTime) {
+            return ((LocalDateTime) temporal).compareTo(toLocalDateTime(text));
+        }
+        if (temporal instanceof LocalDate) {
+            return ((LocalDate) temporal).compareTo(toLocalDate(text));
+        }
+        if (temporal instanceof LocalTime) {
+            return ((LocalTime) temporal).compareTo(toLocalTime(text));
+        }
+        if (temporal instanceof PgInterval) {
+            return ((PgInterval) temporal).compareTo(toInterval(text));
+        }
+        throw new IllegalStateException("unreachable: isDateTime guarded the caller");
     }
 
     /**
