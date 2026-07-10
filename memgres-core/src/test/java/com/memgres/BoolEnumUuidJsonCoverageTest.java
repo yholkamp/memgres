@@ -489,6 +489,163 @@ class BoolEnumUuidJsonCoverageTest {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Bug 4: array-literal element quotes must be stripped when casting
+    // to enum[] (and other element types). PostgreSQL strips the
+    // double-quotes JDBC's Connection.createArrayOf wire-encodes around
+    // each element, e.g. {"api","direct"}; memgres must do the same.
+    // ------------------------------------------------------------------
+
+    @Test
+    void enum_array_any_via_jdbc_createArrayOf() throws SQLException {
+        // Mirrors the app-level failure: rm.type = ANY(:resultTypes::result_type[])
+        // bound via jdbi's StringListArgumentFactory, which calls
+        // Connection.createArrayOf("text", ...) (jdbi binds the enum list as a
+        // List<String>, not the enum type itself) and lets the SQL do the
+        // ::result_type[] cast. pgjdbc wire-encodes the parameter as the text-array
+        // literal {"api","direct"} — quoted because the elements are of unknown/text
+        // type, not because the target is an enum.
+        try (Statement s = conn.createStatement()) {
+            s.execute("CREATE TYPE result_type_jdbc AS ENUM ('api', 'direct', 'manual')");
+            s.execute("CREATE TABLE enum_any_jdbc_test (id SERIAL, rtype result_type_jdbc)");
+            s.execute("INSERT INTO enum_any_jdbc_test (rtype) VALUES ('api'), ('direct'), ('manual')");
+        }
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT rtype FROM enum_any_jdbc_test WHERE rtype = ANY(?::result_type_jdbc[]) ORDER BY id")) {
+            Array param = conn.createArrayOf("text", new String[]{"api", "direct"});
+            ps.setArray(1, param);
+            try (ResultSet rs = ps.executeQuery()) {
+                assertTrue(rs.next()); assertEquals("api", rs.getString(1));
+                assertTrue(rs.next()); assertEquals("direct", rs.getString(1));
+                assertFalse(rs.next());
+            }
+        } finally {
+            try (Statement s = conn.createStatement()) {
+                s.execute("DROP TABLE enum_any_jdbc_test");
+                s.execute("DROP TYPE result_type_jdbc");
+            }
+        }
+    }
+
+    @Test
+    void enum_array_literal_quoted_elements_cast() throws SQLException {
+        try (Statement s = conn.createStatement()) {
+            s.execute("CREATE TYPE mood_qarr AS ENUM ('sad', 'ok', 'happy')");
+            ResultSet rs = s.executeQuery("SELECT ('{\"sad\",\"happy\"}'::mood_qarr[])[1], ('{\"sad\",\"happy\"}'::mood_qarr[])[2]");
+            assertTrue(rs.next());
+            assertEquals("sad", rs.getString(1));
+            assertEquals("happy", rs.getString(2));
+            s.execute("DROP TYPE mood_qarr");
+        }
+    }
+
+    @Test
+    void array_literal_unquoted_elements() throws SQLException {
+        try (Statement s = conn.createStatement()) {
+            ResultSet rs = s.executeQuery("SELECT ('{api,web}'::text[])[1], ('{api,web}'::text[])[2]");
+            assertTrue(rs.next());
+            assertEquals("api", rs.getString(1));
+            assertEquals("web", rs.getString(2));
+        }
+    }
+
+    @Test
+    void array_literal_escaped_characters_in_quotes() throws SQLException {
+        try (Statement s = conn.createStatement()) {
+            ResultSet rs = s.executeQuery("SELECT ('{\"a\\\"b\",\"c\\\\d\"}'::text[])[1], ('{\"a\\\"b\",\"c\\\\d\"}'::text[])[2]");
+            assertTrue(rs.next());
+            assertEquals("a\"b", rs.getString(1));
+            assertEquals("c\\d", rs.getString(2));
+        }
+    }
+
+    @Test
+    void array_literal_quoted_elements_with_commas_braces_and_padding() throws SQLException {
+        try (Statement s = conn.createStatement()) {
+            ResultSet rs = s.executeQuery(
+                    "SELECT ('{\"a,b\",\"{x}\",\"  padded  \"}'::text[])[1], "
+                    + "('{\"a,b\",\"{x}\",\"  padded  \"}'::text[])[2], "
+                    + "('{\"a,b\",\"{x}\",\"  padded  \"}'::text[])[3]");
+            assertTrue(rs.next());
+            assertEquals("a,b", rs.getString(1));
+            assertEquals("{x}", rs.getString(2));
+            assertEquals("  padded  ", rs.getString(3));
+        }
+    }
+
+    @Test
+    void array_literal_null_vs_quoted_null_string() throws SQLException {
+        try (Statement s = conn.createStatement()) {
+            ResultSet rs = s.executeQuery("SELECT ('{NULL}'::text[])[1], ('{\"NULL\"}'::text[])[1]");
+            assertTrue(rs.next());
+            assertNull(rs.getString(1));
+            assertEquals("NULL", rs.getString(2));
+        }
+    }
+
+    @Test
+    void array_literal_empty_string_must_be_quoted() throws SQLException {
+        try (Statement s = conn.createStatement()) {
+            ResultSet rs = s.executeQuery("SELECT ('{\"\"}'::text[])[1]");
+            assertTrue(rs.next());
+            assertEquals("", rs.getString(1));
+        }
+    }
+
+    @Test
+    void int_array_literal_quoted_elements_cast() throws SQLException {
+        try (Statement s = conn.createStatement()) {
+            ResultSet rs = s.executeQuery("SELECT ('{\"1\",\"2\"}'::int[])[1], ('{\"1\",\"2\"}'::int[])[2]");
+            assertTrue(rs.next());
+            assertEquals(1, rs.getInt(1));
+            assertEquals(2, rs.getInt(2));
+        }
+    }
+
+    @Test
+    void text_array_literal_unquoted_numeric_elements_keep_raw_text() throws SQLException {
+        // PG keeps the raw element text when casting to text[]: no numeric
+        // normalization ({01,02} must not become {1,2}).
+        try (Statement s = conn.createStatement()) {
+            ResultSet rs = s.executeQuery("SELECT ('{01,02}'::text[])[1], ('{01,02}'::text[])[2]");
+            assertTrue(rs.next());
+            assertEquals("01", rs.getString(1));
+            assertEquals("02", rs.getString(2));
+        }
+    }
+
+    @Test
+    void text_array_literal_signed_numeric_elements_keep_raw_text() throws SQLException {
+        try (Statement s = conn.createStatement()) {
+            ResultSet rs = s.executeQuery("SELECT ('{+5,-5}'::text[])[1], ('{+5,-5}'::text[])[2]");
+            assertTrue(rs.next());
+            assertEquals("+5", rs.getString(1));
+            assertEquals("-5", rs.getString(2));
+        }
+    }
+
+    @Test
+    void int_array_literal_unquoted_elements_with_leading_zeros_cast() throws SQLException {
+        // The target-type cast still converts the raw text to integers.
+        try (Statement s = conn.createStatement()) {
+            ResultSet rs = s.executeQuery("SELECT ('{01,02}'::int[])[1], ('{01,02}'::int[])[2]");
+            assertTrue(rs.next());
+            assertEquals(1, rs.getInt(1));
+            assertEquals(2, rs.getInt(2));
+        }
+    }
+
+    @Test
+    void text_array_literal_null_stays_sql_null_in_cast_path() throws SQLException {
+        try (Statement s = conn.createStatement()) {
+            ResultSet rs = s.executeQuery("SELECT ('{NULL,a}'::text[])[1], ('{NULL,a}'::text[])[2]");
+            assertTrue(rs.next());
+            assertNull(rs.getString(1));
+            assertTrue(rs.wasNull());
+            assertEquals("a", rs.getString(2));
+        }
+    }
+
     // ========================================================================
     // 36. UUID Type
     // ========================================================================

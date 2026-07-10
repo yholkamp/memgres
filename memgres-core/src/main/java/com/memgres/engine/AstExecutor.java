@@ -333,6 +333,11 @@ public class AstExecutor {
         return arrayOperationHandler.parsePostgresArrayLiteral(s);
     }
 
+    /** Raw-string variant: unquoted elements keep their original text (see ArrayOperationHandler). */
+    List<Object> parsePostgresArrayLiteralRaw(String s) {
+        return arrayOperationHandler.parsePostgresArrayLiteral(s, true);
+    }
+
     void validateCaseBranchTypesForPrepare(CaseExpr c) {
         exprEvaluator.validateCaseBranchTypesForPrepare(c);
     }
