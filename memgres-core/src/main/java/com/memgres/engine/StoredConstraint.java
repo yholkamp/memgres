@@ -148,6 +148,51 @@ public class StoredConstraint {
         return deferrable && initiallyDeferred;
     }
 
+    /**
+     * Creates an independent copy of this constraint for a partition that inherits it from
+     * a parent (or ancestor) table. Row storage for a partitioned table lives entirely on the
+     * leaf partitions, so each partition must enforce its own PK/UNIQUE constraints via its own
+     * {@link TableIndex} rather than sharing the parent's {@code StoredConstraint} instance:
+     * that instance is mutable (see {@code setConvalidated}, {@code setNotEnforced}, etc.), and
+     * operations like {@code ALTER TABLE ... VALIDATE CONSTRAINT} mutate whichever instance they
+     * find by name — sharing it would let a change made through one table silently leak to
+     * every sibling that happens to reference the same object.
+     * <p>
+     * Mirrors PostgreSQL, which gives each partition's inherited constraint its own
+     * auto-generated, partition-scoped name (e.g. {@code <partition>_pkey}) rather than reusing
+     * the parent's constraint name — even though memgres additionally namespaces constraints
+     * and their backing indexes per-{@link Table} instance, so a bare name collision across
+     * tables would not by itself cause incorrect lookups.
+     *
+     * @param partitionTableName the name of the partition the copy will be attached to
+     */
+    public StoredConstraint copyForPartition(String partitionTableName) {
+        String newName = name;
+        if (type == Type.PRIMARY_KEY) {
+            newName = partitionTableName + "_pkey";
+        } else if (type == Type.UNIQUE) {
+            newName = partitionTableName + "_" + String.join("_", columns) + "_key";
+        }
+        StoredConstraint copy = new StoredConstraint(newName, type, columns, checkExpr,
+                referencesTable, referencesColumns, onDelete, onUpdate);
+        copy.referencesSchema = referencesSchema;
+        copy.excludeElements = excludeElements;
+        copy.nullsNotDistinct = nullsNotDistinct;
+        copy.deferrable = deferrable;
+        copy.initiallyDeferred = initiallyDeferred;
+        copy.notEnforced = notEnforced;
+        copy.noInherit = noInherit;
+        copy.convalidated = convalidated;
+        copy.fromIndex = fromIndex;
+        copy.promotedFromIndex = promotedFromIndex;
+        copy.matchType = matchType;
+        copy.whereExpr = whereExpr;
+        copy.expressionColumns = expressionColumns;
+        copy.onDeleteSetNullColumns = onDeleteSetNullColumns;
+        copy.onUpdateSetNullColumns = onUpdateSetNullColumns;
+        return copy;
+    }
+
     public static FkAction parseFkAction(String action) {
         if (action == null) return FkAction.NO_ACTION;
         // Strip column list suffix (e.g., "SET NULL:a,b" -> "SET NULL")

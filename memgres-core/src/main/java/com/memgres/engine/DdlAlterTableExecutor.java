@@ -726,7 +726,35 @@ class DdlAlterTableExecutor {
                     validateCheckConstraintData(sc, table);
                 }
             }
+            if (sc.getType() == StoredConstraint.Type.PRIMARY_KEY || sc.getType() == StoredConstraint.Type.UNIQUE) {
+                // Same invariant CREATE TABLE enforces for partitioned tables: a PK/UNIQUE
+                // constraint must include every partition key column. Validate before adding
+                // to (or propagating onto) the table, matching creation-time ordering.
+                DdlTableExecutor.validatePartitionKeyCoverage(table, sc);
+            }
             table.addConstraint(sc);
+            if (sc.getType() == StoredConstraint.Type.PRIMARY_KEY || sc.getType() == StoredConstraint.Type.UNIQUE) {
+                propagateConstraintToPartitions(table, sc);
+            }
+        }
+    }
+
+    /**
+     * Copies a newly-added PK/UNIQUE constraint onto every existing partition (recursively, for
+     * multi-level partitioning) of a partitioned parent. Row storage for a partitioned table
+     * lives entirely on the leaf partitions, so a constraint added to the parent after
+     * partitions already exist must reach each partition's own TableIndex too - otherwise
+     * per-partition duplicate-key checks and ON CONFLICT conflict detection would miss rows that
+     * already live there, the same bug class fixed for creation-time constraints in
+     * {@link DdlTableExecutor#createPartitionOfTable}. Each partition gets its own independent
+     * {@code StoredConstraint} copy (see {@link StoredConstraint#copyForPartition}) rather than
+     * sharing the parent's instance.
+     */
+    private void propagateConstraintToPartitions(Table table, StoredConstraint sc) {
+        for (Table partition : table.getPartitions()) {
+            DdlTableExecutor.validatePartitionKeyCoverage(partition, sc);
+            partition.addConstraint(sc.copyForPartition(partition.getName()));
+            propagateConstraintToPartitions(partition, sc);
         }
     }
 
