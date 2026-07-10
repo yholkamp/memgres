@@ -1342,7 +1342,7 @@ class SelectParser {
             }
             parser.expect(TokenType.RIGHT_PAREN);
             // Optional WITH ORDINALITY
-            parser.matchKeywords("WITH", "ORDINALITY");
+            boolean withOrdinality = parser.matchKeywords("WITH", "ORDINALITY");
             String alias = null;
             if (parser.matchKeyword("AS")) {
                 alias = parser.readIdentifier();
@@ -1368,7 +1368,7 @@ class SelectParser {
                 }
                 parser.expect(TokenType.RIGHT_PAREN);
             }
-            return new SelectStmt.FunctionFrom(name1, args, alias, colAliases);
+            return new SelectStmt.FunctionFrom(name1, args, alias, colAliases, withOrdinality);
         }
 
         String schema = null;
@@ -1386,7 +1386,7 @@ class SelectParser {
                     args = parser.parseExpressionList();
                 }
                 parser.expect(TokenType.RIGHT_PAREN);
-                parser.matchKeywords("WITH", "ORDINALITY");
+                boolean withOrdinality = parser.matchKeywords("WITH", "ORDINALITY");
                 String funcAlias = null;
                 if (parser.matchKeyword("AS")) {
                     funcAlias = parser.readIdentifier();
@@ -1408,7 +1408,7 @@ class SelectParser {
                     parser.expect(TokenType.RIGHT_PAREN);
                 }
                 String qualifiedName = schema + "." + tableName;
-                return new SelectStmt.FunctionFrom(qualifiedName, args, funcAlias, colAliases);
+                return new SelectStmt.FunctionFrom(qualifiedName, args, funcAlias, colAliases, withOrdinality);
             }
         }
 

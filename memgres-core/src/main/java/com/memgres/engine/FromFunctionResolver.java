@@ -20,8 +20,24 @@ class FromFunctionResolver {
 
     /**
      * Resolve a set-returning function in FROM clause.
+     * Marks the resulting virtual tables with SRF provenance ({@link Table#setFunctionResult})
+     * so ExprEvaluator's attribute-notation fallback (alias.func ≡ func(alias)) only ever applies
+     * to FROM-function aliases, never to ordinary table/subquery/VALUES/CTE aliases.
      */
     List<RowContext> resolveFunctionFrom(SelectStmt.FunctionFrom funcFrom) {
+        List<RowContext> contexts = doResolveFunctionFrom(funcFrom);
+        // TABLESAMPLE binds the real stored table; never flag persistent tables.
+        if (!funcFrom.functionName().toLowerCase().startsWith("__tablesample__:")) {
+            for (RowContext rc : contexts) {
+                for (RowContext.TableBinding b : rc.getBindings()) {
+                    b.table().setFunctionResult(true);
+                }
+            }
+        }
+        return contexts;
+    }
+
+    private List<RowContext> doResolveFunctionFrom(SelectStmt.FunctionFrom funcFrom) {
         String rawFname = funcFrom.functionName().toLowerCase();
         String fname = rawFname.contains(".") ? rawFname.substring(rawFname.lastIndexOf('.') + 1) : rawFname;
         String alias = funcFrom.alias() != null ? funcFrom.alias() : fname;
@@ -34,7 +50,7 @@ class FromFunctionResolver {
         for (Expression arg : funcFrom.args()) {
             evalArgs.add(executor.evalExpr(arg, null));
         }
-        if (fname.equals("generate_series")) return resolveGenerateSeries(alias, colAliases, evalArgs);
+        if (fname.equals("generate_series")) return resolveGenerateSeries(alias, colAliases, evalArgs, funcFrom.withOrdinality());
         if (fname.equals("generate_subscripts")) return resolveGenerateSubscripts(alias, colAliases, evalArgs);
         if (fname.equals("pg_indexam_has_property")) return resolvePgIndexamHasProperty(alias, evalArgs);
         if (fname.equals("pg_available_extension_versions")) return resolvePgAvailableExtensionVersions(alias);
@@ -88,7 +104,12 @@ class FromFunctionResolver {
 
     // ---- generate_series ----
 
-    private List<RowContext> resolveGenerateSeries(String alias, List<String> colAliases, List<Object> evalArgs) {
+    private List<RowContext> resolveGenerateSeries(String alias, List<String> colAliases, List<Object> evalArgs,
+                                                   boolean withOrdinality) {
+        // WITH ORDINALITY (parser flag) is the source of truth; the second-column-alias heuristic
+        // is kept as a lenient fallback for callers that pass 2 aliases without the clause.
+        boolean hasOrdinality = withOrdinality || (colAliases != null && colAliases.size() >= 2);
+        String ordColName = (colAliases != null && colAliases.size() >= 2) ? colAliases.get(1) : "ordinality";
         Object stepObj = evalArgs.size() > 2 ? evalArgs.get(2) : null;
         // OffsetDateTime (timestamptz) overload
         if (evalArgs.get(0) instanceof java.time.OffsetDateTime) {
@@ -98,13 +119,18 @@ class FromFunctionResolver {
             PgInterval ivStep = stepObj != null ? TypeCoercion.toInterval(stepObj) : new PgInterval(0, 1, 0);
             boolean ascending = !tzStart.isAfter(tzStop);
             String colName = firstColAlias(colAliases, alias);
-            Column col = new Column(colName, DataType.TIMESTAMPTZ, true, false, null);
-            Table virtualTable = new Table(alias, Cols.listOf(col));
+            List<Column> cols = new ArrayList<>();
+            cols.add(new Column(colName, DataType.TIMESTAMPTZ, true, false, null));
+            if (hasOrdinality) {
+                cols.add(new Column(ordColName, DataType.BIGINT, true, false, null));
+            }
+            Table virtualTable = new Table(alias, cols);
             List<RowContext> contexts = new ArrayList<>();
             java.time.OffsetDateTime cur = tzStart;
+            long ord = 1;
             for (int guard = 0; guard < 10000; guard++) {
                 if (ascending ? cur.isAfter(tzStop) : cur.isBefore(tzStop)) break;
-                Object[] row = new Object[]{cur};
+                Object[] row = hasOrdinality ? new Object[]{cur, ord++} : new Object[]{cur};
                 virtualTable.insertRow(row);
                 contexts.add(new RowContext(virtualTable, alias, row));
                 java.time.OffsetDateTime next = ivStep.addTo(cur);
@@ -123,14 +149,19 @@ class FromFunctionResolver {
             boolean ascending = !dtStart.isAfter(dtStop);
             String colName = firstColAlias(colAliases, alias);
             // DATE input → timestamptz (PG promotes), TIMESTAMP input → timestamp
-            Column col = new Column(colName, dateInput ? DataType.TIMESTAMPTZ : DataType.TIMESTAMP, true, false, null);
-            Table virtualTable = new Table(alias, Cols.listOf(col));
+            List<Column> cols = new ArrayList<>();
+            cols.add(new Column(colName, dateInput ? DataType.TIMESTAMPTZ : DataType.TIMESTAMP, true, false, null));
+            if (hasOrdinality) {
+                cols.add(new Column(ordColName, DataType.BIGINT, true, false, null));
+            }
+            Table virtualTable = new Table(alias, cols);
             List<RowContext> contexts = new ArrayList<>();
             java.time.LocalDateTime cur = dtStart;
+            long ord = 1;
             for (int guard = 0; guard < 10000; guard++) {
                 if (ascending ? cur.isAfter(dtStop) : cur.isBefore(dtStop)) break;
                 Object val = dateInput ? cur.atZone(java.time.ZoneOffset.UTC).toOffsetDateTime() : cur;
-                Object[] row = new Object[]{val};
+                Object[] row = hasOrdinality ? new Object[]{val, ord++} : new Object[]{val};
                 virtualTable.insertRow(row);
                 contexts.add(new RowContext(virtualTable, alias, row));
                 java.time.LocalDateTime next = ivStep.addTo(cur);
@@ -152,9 +183,8 @@ class FromFunctionResolver {
         String colName = firstColAlias(colAliases, alias);
         List<Column> cols = new ArrayList<>();
         cols.add(new Column(colName, DataType.INTEGER, true, false, null));
-        boolean hasOrdinality = colAliases != null && colAliases.size() >= 2;
         if (hasOrdinality) {
-            cols.add(new Column(colAliases.get(1), DataType.BIGINT, true, false, null));
+            cols.add(new Column(ordColName, DataType.BIGINT, true, false, null));
         }
         Table virtualTable = new Table(alias, cols);
         List<RowContext> contexts = new ArrayList<>();

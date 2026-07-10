@@ -57,6 +57,11 @@ public class Table {
     // Unlogged table
     private boolean unlogged;
 
+    // Provenance marker: true for transient virtual tables built by FromFunctionResolver for
+    // set-returning functions in FROM (generate_series, unnest, ...). Never set on stored tables,
+    // subquery/VALUES/CTE result tables. Gates the attribute-notation fallback in ExprEvaluator.
+    private boolean functionResult;
+
     // Replica identity for logical replication (DEFAULT, FULL, NOTHING, or index name)
     // 'd' = DEFAULT (PK), 'f' = FULL, 'n' = NOTHING, 'i' = USING INDEX
     private volatile char replicaIdentity = 'd';
@@ -602,6 +607,10 @@ public class Table {
     // Unlogged
     public boolean isUnlogged() { return unlogged; }
     public void setUnlogged(boolean unlogged) { this.unlogged = unlogged; }
+
+    // FROM-function (SRF) result provenance
+    public boolean isFunctionResult() { return functionResult; }
+    public void setFunctionResult(boolean functionResult) { this.functionResult = functionResult; }
     public Map<String, String> getReloptions() { return reloptions; }
     public void setReloptions(Map<String, String> reloptions) { this.reloptions = reloptions; }
 

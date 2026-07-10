@@ -145,15 +145,25 @@ class SelectExecutor {
                     } else {
                         boolean tableFound = false;
                         boolean colFound = false;
+                        boolean mayResolveViaAttributeNotation = false;
                         for (RowContext.TableBinding b : baseBindings) {
                             if (!cr.table().equalsIgnoreCase(b.alias()) && !cr.table().equalsIgnoreCase(b.table().getName())) continue;
                             tableFound = true;
                             if (b.table().getColumnIndex(cr.column()) >= 0) { colFound = true; break; }
+                            // Mirror ExprEvaluator.tryAttributeNotationFallback's guard: a
+                            // single-column FROM-function (SRF) binding may resolve cr.column()
+                            // at evaluation time via attribute notation (alias.name == name(alias),
+                            // e.g. gs.date == date(gs)) even though it isn't a real column. Defer
+                            // to evaluation time instead of rejecting here; ExprEvaluator raises
+                            // the same 42703 if the fallback doesn't apply (unknown cast/function).
+                            if (b.table().isFunctionResult() && b.table().getColumns().size() == 1) {
+                                mayResolveViaAttributeNotation = true;
+                            }
                         }
                         if (!tableFound) {
                             throw new MemgresException("missing FROM-clause entry for table \"" + cr.table() + "\"", "42P01");
                         }
-                        if (!colFound) {
+                        if (!colFound && !mayResolveViaAttributeNotation) {
                             MemgresException colEx = new MemgresException("column \"" + cr.column() + "\" does not exist", "42703");
                             for (RowContext.TableBinding b : baseBindings) {
                                 String hint = RowContext.suggestClosestColumn(cr.column(), b.table());
