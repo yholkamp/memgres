@@ -478,6 +478,14 @@ class FunctionEvaluator {
                 Object startObj = executor.evalExpr(fn.args().get(0), ctx);
                 Object stopObj = executor.evalExpr(fn.args().get(1), ctx);
                 Object stepObj = fn.args().size() > 2 ? executor.evalExpr(fn.args().get(2), ctx) : null;
+                // generate_series is a strict function: a NULL start/stop bound (e.g. a
+                // parameter that is unknown/NULL at Describe time, or a NULL computed via
+                // date_trunc/AT TIME ZONE of a NULL timestamp) yields an empty set, not an
+                // error. Without this guard the date/timestamp overload below unconditionally
+                // calls TypeCoercion.toLocalDateTime(null), which NPEs on "val.toString()".
+                if (startObj == null || stopObj == null) {
+                    return new ArrayList<>();
+                }
                 // OffsetDateTime (timestamptz) overload
                 if (startObj instanceof java.time.OffsetDateTime) {
                     java.time.OffsetDateTime tzStart = (java.time.OffsetDateTime) startObj;
