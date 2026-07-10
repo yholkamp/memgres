@@ -952,7 +952,7 @@ class SelectExecutor {
                     }
                     resultColumns.add(rc);
                 } else {
-                    resultColumns.add(new Column(alias, executor.inferTypeFromContext(expr, baseBindings), true, false, null));
+                    resultColumns.add(buildProjectedColumn(alias, expr, baseBindings));
                 }
                 projections.add(ctx -> executor.evalExpr(expr, ctx));
             }
@@ -1135,7 +1135,7 @@ class SelectExecutor {
                 for (SelectStmt.SelectTarget target : stmt.targets()) {
                     String alias = target.alias();
                     if (alias == null) alias = executor.exprToAlias(target.expr());
-                    columns.add(new Column(alias, executor.inferExprType(target.expr()), true, false, null));
+                    columns.add(buildProjectedColumn(alias, target.expr(), Cols.listOf()));
                 }
                 return QueryResult.select(columns, new ArrayList<>());
             }
@@ -1171,7 +1171,7 @@ class SelectExecutor {
                 } else {
                     String alias = target.alias();
                     if (alias == null) alias = executor.exprToAlias(target.expr());
-                    columns.add(new Column(alias, executor.inferExprType(target.expr()), true, false, null));
+                    columns.add(buildProjectedColumn(alias, target.expr(), Cols.listOf()));
                     valuesList.add(executor.evalExpr(target.expr(), null));
                 }
             }
@@ -1194,7 +1194,14 @@ class SelectExecutor {
             if (val instanceof byte[] && resultType == DataType.TEXT) {
                 resultType = DataType.BYTEA;
             }
-            columns.add(new Column(alias, resultType, true, false, null));
+            if (resultType == DataType.ENUM) {
+                String enumTypeName = executor.resolveEnumTypeName(target.expr(), Cols.listOf());
+                columns.add(enumTypeName != null
+                        ? new Column(alias, DataType.ENUM, true, false, null, enumTypeName)
+                        : new Column(alias, DataType.TEXT, true, false, null));
+            } else {
+                columns.add(new Column(alias, resultType, true, false, null));
+            }
             if (val instanceof List<?> && isSrfCall(target.expr())) {
                 List<?> list = (List<?>) val;
                 if (srfIndex < 0) {
@@ -1283,6 +1290,29 @@ class SelectExecutor {
         if (expr instanceof FunctionCallExpr && SRF_FUNCTIONS.contains(FunctionEvaluator.stripSchemaPrefix(((FunctionCallExpr) expr).name().toLowerCase()))) return true;
         if (expr instanceof CastExpr) return isSrfCall(((CastExpr) expr).expr());
         return false;
+    }
+
+    /**
+     * Builds the result {@link Column} for a projected expression that isn't a plain column
+     * reference (which instead copies its source Column verbatim, including enum type name). When
+     * the expression's inferred type is {@link DataType#ENUM} (e.g. {@code COALESCE(mode,
+     * 'manual')}, a {@code CASE} branching to an enum, an explicit enum cast, ...), the generic
+     * {@link DataType#ENUM} has no per-type OID of its own (it's the hardcoded placeholder OID 0)
+     * -- pgjdbc needs the concrete enum type name to resolve the real OID via the session's
+     * pg_type catalog (see {@code PgWireValueFormatter.columnTypeOid}) and crashes otherwise
+     * (mtask-8 C1). Recovers that name where statically determinable via
+     * {@link AstExecutor#resolveEnumTypeName}; falls back to advertising TEXT (safe) rather than
+     * an unnamed ENUM when it can't be determined.
+     */
+    private Column buildProjectedColumn(String alias, Expression expr, List<RowContext.TableBinding> bindings) {
+        DataType targetType = executor.inferTypeFromContext(expr, bindings);
+        if (targetType == DataType.ENUM) {
+            String enumTypeName = executor.resolveEnumTypeName(expr, bindings);
+            return enumTypeName != null
+                    ? new Column(alias, DataType.ENUM, true, false, null, enumTypeName)
+                    : new Column(alias, DataType.TEXT, true, false, null);
+        }
+        return new Column(alias, targetType, true, false, null);
     }
 
     // ---- CTE delegation ----
